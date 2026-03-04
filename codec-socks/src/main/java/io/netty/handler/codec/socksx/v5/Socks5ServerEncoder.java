@@ -17,6 +17,7 @@
 package io.netty.handler.codec.socksx.v5;
 
 import io.netty.buffer.ByteBuf;
+import io.netty.buffer.ByteBufUtil;
 import io.netty.channel.ChannelHandler.Sharable;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.handler.codec.EncoderException;
@@ -45,6 +46,7 @@ public class Socks5ServerEncoder extends MessageToByteEncoder<Socks5Message> {
      * Creates a new instance with the specified {@link Socks5AddressEncoder}.
      */
     public Socks5ServerEncoder(Socks5AddressEncoder addressEncoder) {
+        super(Socks5Message.class);
         this.addressEncoder = ObjectUtil.checkNotNull(addressEncoder, "addressEncoder");
     }
 
@@ -63,6 +65,8 @@ public class Socks5ServerEncoder extends MessageToByteEncoder<Socks5Message> {
             encodePasswordAuthResponse((Socks5PasswordAuthResponse) msg, out);
         } else if (msg instanceof Socks5CommandResponse) {
             encodeCommandResponse((Socks5CommandResponse) msg, out);
+        } else if (msg instanceof Socks5PrivateAuthResponse) {
+            encodePrivateAuthResponse((Socks5PrivateAuthResponse) msg, out);
         } else {
             throw new EncoderException("unsupported message type: " + StringUtil.simpleClassName(msg));
         }
@@ -78,6 +82,11 @@ public class Socks5ServerEncoder extends MessageToByteEncoder<Socks5Message> {
         out.writeByte(msg.status().byteValue());
     }
 
+    private static void encodePrivateAuthResponse(Socks5PrivateAuthResponse msg, ByteBuf out) {
+        out.writeByte(0x01);
+        out.writeByte(msg.status().byteValue());
+    }
+
     private void encodeCommandResponse(Socks5CommandResponse msg, ByteBuf out) throws Exception {
         out.writeByte(msg.version().byteValue());
         out.writeByte(msg.status().byteValue());
@@ -87,6 +96,6 @@ public class Socks5ServerEncoder extends MessageToByteEncoder<Socks5Message> {
         out.writeByte(bndAddrType.byteValue());
         addressEncoder.encodeAddress(bndAddrType, msg.bndAddr(), out);
 
-        out.writeShort(msg.bndPort());
+        ByteBufUtil.writeShortBE(out, msg.bndPort());
     }
 }

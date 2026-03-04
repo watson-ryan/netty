@@ -25,9 +25,10 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
-import io.netty.channel.DefaultEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.local.LocalAddress;
 import io.netty.channel.local.LocalChannel;
+import io.netty.channel.local.LocalIoHandler;
 import io.netty.channel.local.LocalServerChannel;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.DefaultHttpContent;
@@ -63,10 +64,9 @@ import static io.netty.handler.codec.http.HttpVersion.HTTP_1_1;
 import static io.netty.handler.codec.http2.Http2TestUtil.of;
 import static io.netty.util.CharsetUtil.UTF_8;
 import static java.util.concurrent.TimeUnit.SECONDS;
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.instanceOf;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.anyBoolean;
@@ -374,12 +374,12 @@ public class HttpToHttp2ConnectionHandlerTest {
         assertTrue(writePromise.isDone());
         assertFalse(writePromise.isSuccess());
         Throwable cause = writePromise.cause();
-        assertThat(cause, instanceOf(Http2NoMoreStreamIdsException.class));
+        assertInstanceOf(Http2NoMoreStreamIdsException.class, cause);
 
         assertTrue(writeFuture.isDone());
         assertFalse(writeFuture.isSuccess());
         cause = writeFuture.cause();
-        assertThat(cause, instanceOf(Http2NoMoreStreamIdsException.class));
+        assertInstanceOf(Http2NoMoreStreamIdsException.class, cause);
     }
 
     @Test
@@ -558,7 +558,7 @@ public class HttpToHttp2ConnectionHandlerTest {
         sb = new ServerBootstrap();
         cb = new Bootstrap();
 
-        sb.group(new DefaultEventLoopGroup());
+        sb.group(new MultiThreadIoEventLoopGroup(LocalIoHandler.newFactory()));
         sb.channel(LocalServerChannel.class);
         sb.childHandler(new ChannelInitializer<Channel>() {
             @Override
@@ -576,7 +576,7 @@ public class HttpToHttp2ConnectionHandlerTest {
             }
         });
 
-        cb.group(new DefaultEventLoopGroup());
+        cb.group(new MultiThreadIoEventLoopGroup(LocalIoHandler.newFactory()));
         cb.channel(LocalChannel.class);
         cb.handler(new ChannelInitializer<Channel>() {
             @Override

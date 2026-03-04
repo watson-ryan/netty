@@ -228,7 +228,7 @@ public abstract class AbstractDiskHttpData extends AbstractHttpData {
         }
         file = tempFile();
         RandomAccessFile accessFile = new RandomAccessFile(file, "rw");
-        int written = 0;
+        long written = 0;
         try {
             accessFile.setLength(0);
             FileChannel localfileChannel = accessFile.getChannel();
@@ -239,6 +239,7 @@ public abstract class AbstractDiskHttpData extends AbstractHttpData {
                 byteBuffer.position(read).flip();
                 written += localfileChannel.write(byteBuffer);
                 checkSize(written);
+                byteBuffer.clear();
                 read = inputStream.read(bytes);
             }
             localfileChannel.force(false);
@@ -357,10 +358,10 @@ public abstract class AbstractDiskHttpData extends AbstractHttpData {
         }
         if (encoding == null) {
             byte[] array = readFrom(file);
-            return new String(array, HttpConstants.DEFAULT_CHARSET.name());
+            return new String(array, HttpConstants.DEFAULT_CHARSET);
         }
         byte[] array = readFrom(file);
-        return new String(array, encoding.name());
+        return new String(array, encoding);
     }
 
     @Override

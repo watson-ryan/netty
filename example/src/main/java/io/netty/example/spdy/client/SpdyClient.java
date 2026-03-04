@@ -20,7 +20,8 @@ import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.http.DefaultFullHttpRequest;
 import io.netty.handler.codec.http.HttpHeaderNames;
@@ -40,11 +41,6 @@ import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 /**
  * An SPDY client that allows you to send HTTP GET to a SPDY server.
  * <p>
- * This class must be run with the JVM parameter: {@code java -Xbootclasspath/p:<path_to_npn_boot_jar> ...}. The
- * "path_to_npn_boot_jar" is the path on the file system for the NPN Boot Jar file which can be downloaded from Maven at
- * coordinates org.mortbay.jetty.npn:npn-boot. Different versions applies to different OpenJDK versions. See
- * <a href="https://www.eclipse.org/jetty/documentation/current/npn-chapter.html">Jetty docs</a> for more information.
- * <p>
  * You may also use the {@code run-example.sh} script to start the client from the command line:
  * <pre>
  *     ./run-example.sh spdy-client
@@ -60,7 +56,7 @@ public final class SpdyClient {
         final SslContext sslCtx = SslContextBuilder.forClient()
             .trustManager(InsecureTrustManagerFactory.INSTANCE)
             .applicationProtocolConfig(new ApplicationProtocolConfig(
-                        Protocol.NPN,
+                        Protocol.ALPN,
                         // NO_ADVERTISE is currently the only mode supported by both OpenSsl and JDK providers.
                         SelectorFailureBehavior.NO_ADVERTISE,
                         // ACCEPT is currently the only mode supported by both OpenSsl and JDK providers.
@@ -70,11 +66,11 @@ public final class SpdyClient {
             .build();
 
         HttpResponseClientHandler httpResponseHandler = new HttpResponseClientHandler();
-        EventLoopGroup workerGroup = new NioEventLoopGroup();
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
 
         try {
             Bootstrap b = new Bootstrap();
-            b.group(workerGroup);
+            b.group(group);
             b.channel(NioSocketChannel.class);
             b.option(ChannelOption.SO_KEEPALIVE, true);
             b.remoteAddress(HOST, PORT);
@@ -100,7 +96,7 @@ public final class SpdyClient {
             // Wait until the connection is closed.
             channel.close().syncUninterruptibly();
         } finally {
-            workerGroup.shutdownGracefully();
+            group.shutdownGracefully();
         }
     }
 }

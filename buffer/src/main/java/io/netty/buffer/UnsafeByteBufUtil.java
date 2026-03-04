@@ -33,7 +33,9 @@ import static io.netty.util.internal.PlatformDependent.BIG_ENDIAN_NATIVE_ORDER;
  */
 final class UnsafeByteBufUtil {
     private static final boolean UNALIGNED = PlatformDependent.isUnaligned();
+    private static final boolean USE_VAR_HANDLE = PlatformDependent.useVarHandleForMultiByteAccess();
     private static final byte ZERO = 0;
+    private static final int MAX_HAND_ROLLED_SET_ZERO_BYTES = 64;
 
     static byte getByte(long address) {
         return PlatformDependent.getByte(address);
@@ -236,6 +238,9 @@ final class UnsafeByteBufUtil {
             short v = PlatformDependent.getShort(array, index);
             return BIG_ENDIAN_NATIVE_ORDER ? v : Short.reverseBytes(v);
         }
+        if (USE_VAR_HANDLE) {
+            return VarHandleByteBufferAccess.getShortBE(array, index);
+        }
         return (short) (PlatformDependent.getByte(array, index) << 8 |
                        PlatformDependent.getByte(array, index + 1) & 0xff);
     }
@@ -244,6 +249,9 @@ final class UnsafeByteBufUtil {
         if (UNALIGNED) {
             short v = PlatformDependent.getShort(array, index);
             return BIG_ENDIAN_NATIVE_ORDER ? Short.reverseBytes(v) : v;
+        }
+        if (USE_VAR_HANDLE) {
+            return VarHandleByteBufferAccess.getShortLE(array, index);
         }
         return (short) (PlatformDependent.getByte(array, index) & 0xff |
                        PlatformDependent.getByte(array, index + 1) << 8);
@@ -277,6 +285,9 @@ final class UnsafeByteBufUtil {
             int v = PlatformDependent.getInt(array, index);
             return BIG_ENDIAN_NATIVE_ORDER ? v : Integer.reverseBytes(v);
         }
+        if (USE_VAR_HANDLE) {
+            return VarHandleByteBufferAccess.getIntBE(array, index);
+        }
         return PlatformDependent.getByte(array, index) << 24 |
                (PlatformDependent.getByte(array, index + 1) & 0xff) << 16 |
                (PlatformDependent.getByte(array, index + 2) & 0xff) <<  8 |
@@ -288,6 +299,9 @@ final class UnsafeByteBufUtil {
             int v = PlatformDependent.getInt(array, index);
             return BIG_ENDIAN_NATIVE_ORDER ? Integer.reverseBytes(v) : v;
         }
+        if (USE_VAR_HANDLE) {
+            return VarHandleByteBufferAccess.getIntLE(array, index);
+        }
         return PlatformDependent.getByte(array, index)      & 0xff        |
                (PlatformDependent.getByte(array, index + 1) & 0xff) <<  8 |
                (PlatformDependent.getByte(array, index + 2) & 0xff) << 16 |
@@ -298,6 +312,9 @@ final class UnsafeByteBufUtil {
         if (UNALIGNED) {
             long v = PlatformDependent.getLong(array, index);
             return BIG_ENDIAN_NATIVE_ORDER ? v : Long.reverseBytes(v);
+        }
+        if (USE_VAR_HANDLE) {
+            return VarHandleByteBufferAccess.getLongBE(array, index);
         }
         return ((long) PlatformDependent.getByte(array, index)) << 56 |
                (PlatformDependent.getByte(array, index + 1) & 0xffL) << 48 |
@@ -313,6 +330,9 @@ final class UnsafeByteBufUtil {
         if (UNALIGNED) {
             long v = PlatformDependent.getLong(array, index);
             return BIG_ENDIAN_NATIVE_ORDER ? Long.reverseBytes(v) : v;
+        }
+        if (USE_VAR_HANDLE) {
+            return VarHandleByteBufferAccess.getLongLE(array, index);
         }
         return PlatformDependent.getByte(array, index)      & 0xffL        |
                (PlatformDependent.getByte(array, index + 1) & 0xffL) <<  8 |
@@ -332,6 +352,8 @@ final class UnsafeByteBufUtil {
         if (UNALIGNED) {
             PlatformDependent.putShort(array, index,
                                        BIG_ENDIAN_NATIVE_ORDER ? (short) value : Short.reverseBytes((short) value));
+        } else if (USE_VAR_HANDLE) {
+            VarHandleByteBufferAccess.setShortBE(array, index, value);
         } else {
             PlatformDependent.putByte(array, index, (byte) (value >>> 8));
             PlatformDependent.putByte(array, index + 1, (byte) value);
@@ -342,6 +364,8 @@ final class UnsafeByteBufUtil {
         if (UNALIGNED) {
             PlatformDependent.putShort(array, index,
                                        BIG_ENDIAN_NATIVE_ORDER ? Short.reverseBytes((short) value) : (short) value);
+        } else if (USE_VAR_HANDLE) {
+            VarHandleByteBufferAccess.setShortLE(array, index, value);
         } else {
             PlatformDependent.putByte(array, index, (byte) value);
             PlatformDependent.putByte(array, index + 1, (byte) (value >>> 8));
@@ -375,6 +399,8 @@ final class UnsafeByteBufUtil {
     static void setInt(byte[] array, int index, int value) {
         if (UNALIGNED) {
             PlatformDependent.putInt(array, index, BIG_ENDIAN_NATIVE_ORDER ? value : Integer.reverseBytes(value));
+        } else if (USE_VAR_HANDLE) {
+            VarHandleByteBufferAccess.setIntBE(array, index, value);
         } else {
             PlatformDependent.putByte(array, index, (byte) (value >>> 24));
             PlatformDependent.putByte(array, index + 1, (byte) (value >>> 16));
@@ -386,6 +412,8 @@ final class UnsafeByteBufUtil {
     static void setIntLE(byte[] array, int index, int value) {
         if (UNALIGNED) {
             PlatformDependent.putInt(array, index, BIG_ENDIAN_NATIVE_ORDER ? Integer.reverseBytes(value) : value);
+        } else if (USE_VAR_HANDLE) {
+            VarHandleByteBufferAccess.setIntLE(array, index, value);
         } else {
             PlatformDependent.putByte(array, index, (byte) value);
             PlatformDependent.putByte(array, index + 1, (byte) (value >>> 8));
@@ -397,6 +425,8 @@ final class UnsafeByteBufUtil {
     static void setLong(byte[] array, int index, long value) {
         if (UNALIGNED) {
             PlatformDependent.putLong(array, index, BIG_ENDIAN_NATIVE_ORDER ? value : Long.reverseBytes(value));
+        } else if (USE_VAR_HANDLE) {
+            VarHandleByteBufferAccess.setLongBE(array, index, value);
         } else {
             PlatformDependent.putByte(array, index, (byte) (value >>> 56));
             PlatformDependent.putByte(array, index + 1, (byte) (value >>> 48));
@@ -412,6 +442,8 @@ final class UnsafeByteBufUtil {
     static void setLongLE(byte[] array, int index, long value) {
         if (UNALIGNED) {
             PlatformDependent.putLong(array, index, BIG_ENDIAN_NATIVE_ORDER ? Long.reverseBytes(value) : value);
+        } else if (USE_VAR_HANDLE) {
+            VarHandleByteBufferAccess.setLongLE(array, index, value);
         } else {
             PlatformDependent.putByte(array, index, (byte) value);
             PlatformDependent.putByte(array, index + 1, (byte) (value >>> 8));
@@ -424,11 +456,28 @@ final class UnsafeByteBufUtil {
         }
     }
 
+    private static void batchSetZero(byte[] data, int index, int length) {
+        int longBatches = length >>> 3;
+        for (int i = 0; i < longBatches; i++) {
+            PlatformDependent.putLong(data, index, ZERO);
+            index += 8;
+        }
+        final int remaining = length & 0x07;
+        for (int i = 0; i < remaining; i++) {
+            PlatformDependent.putByte(data, index + i, ZERO);
+        }
+    }
+
     static void setZero(byte[] array, int index, int length) {
         if (length == 0) {
             return;
         }
-        PlatformDependent.setMemory(array, index, length, ZERO);
+        // fast-path for small writes to avoid thread-state change JDK's handling
+        if (UNALIGNED && length <= MAX_HAND_ROLLED_SET_ZERO_BYTES) {
+            batchSetZero(array, index, length);
+        } else {
+            PlatformDependent.setMemory(array, index, length, ZERO);
+        }
     }
 
     static ByteBuf copy(AbstractByteBuf buf, long addr, int index, int length) {
@@ -618,20 +667,66 @@ final class UnsafeByteBufUtil {
         } while (outLen > 0);
     }
 
+    private static void batchSetZero(long addr, int length) {
+        int longBatches = length >>> 3;
+        for (int i = 0; i < longBatches; i++) {
+            PlatformDependent.putLong(addr, ZERO);
+            addr += 8;
+        }
+        final int remaining = length & 0x07;
+        for (int i = 0; i < remaining; i++) {
+            PlatformDependent.putByte(addr + i, ZERO);
+        }
+    }
+
     static void setZero(long addr, int length) {
         if (length == 0) {
             return;
         }
+        // fast-path for small writes to avoid thread-state change JDK's handling
+        if (length <= MAX_HAND_ROLLED_SET_ZERO_BYTES) {
+            if (!UNALIGNED) {
+                // write bytes until the address is aligned
+                int bytesToGetAligned = zeroTillAligned(addr, length);
+                addr += bytesToGetAligned;
+                length -= bytesToGetAligned;
+                if (length == 0) {
+                    return;
+                }
+                assert is8BytesAligned(addr);
+            }
+            batchSetZero(addr, length);
+        } else {
+            PlatformDependent.setMemory(addr, length, ZERO);
+        }
+    }
 
-        PlatformDependent.setMemory(addr, length, ZERO);
+    static long next8bytesAlignedAddr(long addr) {
+        return (addr + 7L) & ~7L;
+    }
+
+    static boolean is8BytesAligned(long addr) {
+        return (addr & 7L) == 0;
+    }
+
+    private static int zeroTillAligned(long addr, int length) {
+        long alignedAddr = next8bytesAlignedAddr(addr);
+        int bytesToGetAligned = (int) (alignedAddr - addr);
+        int toZero = Math.min(bytesToGetAligned, length);
+        for (int i = 0; i < toZero; i++) {
+            PlatformDependent.putByte(addr + i, ZERO);
+        }
+        return toZero;
     }
 
     static UnpooledUnsafeDirectByteBuf newUnsafeDirectByteBuf(
             ByteBufAllocator alloc, int initialCapacity, int maxCapacity) {
         if (PlatformDependent.useDirectBufferNoCleaner()) {
-            return new UnpooledUnsafeNoCleanerDirectByteBuf(alloc, initialCapacity, maxCapacity);
+            return new UnpooledUnsafeNoCleanerDirectByteBuf(
+                    alloc, initialCapacity, maxCapacity);
         }
-        return new UnpooledUnsafeDirectByteBuf(alloc, initialCapacity, maxCapacity);
+        return new UnpooledUnsafeDirectByteBuf(
+                alloc, initialCapacity, maxCapacity);
     }
 
     private UnsafeByteBufUtil() { }

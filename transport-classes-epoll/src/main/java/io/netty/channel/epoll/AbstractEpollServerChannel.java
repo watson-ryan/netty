@@ -21,7 +21,6 @@ import io.netty.channel.ChannelMetadata;
 import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
-import io.netty.channel.EventLoop;
 import io.netty.channel.ServerChannel;
 
 import java.net.InetSocketAddress;
@@ -34,22 +33,17 @@ public abstract class AbstractEpollServerChannel extends AbstractEpollChannel im
         this(new LinuxSocket(fd), false);
     }
 
-    AbstractEpollServerChannel(LinuxSocket fd) {
+    protected AbstractEpollServerChannel(LinuxSocket fd) {
         this(fd, isSoErrorZero(fd));
     }
 
-    AbstractEpollServerChannel(LinuxSocket fd, boolean active) {
-        super(null, fd, active);
+    protected AbstractEpollServerChannel(LinuxSocket fd, boolean active) {
+        super(null, fd, active, EpollIoOps.valueOf(0));
     }
 
     @Override
     public ChannelMetadata metadata() {
         return METADATA;
-    }
-
-    @Override
-    protected boolean isCompatible(EventLoop loop) {
-        return loop instanceof EpollEventLoop;
     }
 
     @Override
@@ -72,13 +66,12 @@ public abstract class AbstractEpollServerChannel extends AbstractEpollChannel im
         throw new UnsupportedOperationException();
     }
 
-    abstract Channel newChildChannel(int fd, byte[] remote, int offset, int len) throws Exception;
+    protected abstract Channel newChildChannel(int fd, byte[] remote, int offset, int len) throws Exception;
 
     final class EpollServerSocketUnsafe extends AbstractEpollUnsafe {
         // Will hold the remote address after accept(...) was successful.
         // We need 24 bytes for the address as maximum + 1 byte for storing the length.
-        // So use 26 bytes as it's a power of two.
-        private final byte[] acceptedAddress = new byte[26];
+        private final byte[] acceptedAddress = new byte[25];
 
         @Override
         public void connect(SocketAddress socketAddress, SocketAddress socketAddress2, ChannelPromise channelPromise) {
@@ -95,12 +88,9 @@ public abstract class AbstractEpollServerChannel extends AbstractEpollChannel im
                 return;
             }
             final EpollRecvByteAllocatorHandle allocHandle = recvBufAllocHandle();
-            allocHandle.edgeTriggered(isFlagSet(Native.EPOLLET));
-
             final ChannelPipeline pipeline = pipeline();
             allocHandle.reset(config);
             allocHandle.attemptedBytesRead(1);
-            epollInBefore();
 
             Throwable exception = null;
             try {
@@ -130,7 +120,9 @@ public abstract class AbstractEpollServerChannel extends AbstractEpollChannel im
                     pipeline.fireExceptionCaught(exception);
                 }
             } finally {
-                epollInFinally(config);
+                if (shouldStopReading(config)) {
+                    clearEpollIn();
+                }
             }
         }
     }

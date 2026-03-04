@@ -19,8 +19,6 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelOutboundHandlerAdapter;
 import io.netty.channel.embedded.EmbeddedChannel;
-import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.GenericFutureListener;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
@@ -40,9 +38,10 @@ public class FlushConsolidationHandlerTest {
         final AtomicInteger flushCount = new AtomicInteger();
         EmbeddedChannel channel = newChannel(flushCount,  true);
         // Flushes should not go through immediately, as they're scheduled as an async task
-        channel.flush();
+        // To ensure we not run the async task directly we will call trigger the flush() via the pipeline.
+        channel.pipeline().flush();
         assertEquals(0, flushCount.get());
-        channel.flush();
+        channel.pipeline().flush();
         assertEquals(0, flushCount.get());
         // Trigger the execution of the async task
         channel.runPendingTasks();
@@ -56,7 +55,8 @@ public class FlushConsolidationHandlerTest {
         EmbeddedChannel channel = newChannel(flushCount, true);
         // After a given threshold, the async task should be bypassed and a flush should be triggered immediately
         for (int i = 0; i < EXPLICIT_FLUSH_AFTER_FLUSHES; i++) {
-            channel.flush();
+            // To ensure we not run the async task directly we will call trigger the flush() via the pipeline.
+            channel.pipeline().flush();
         }
         assertEquals(1, flushCount.get());
         assertFalse(channel.finish());
@@ -170,12 +170,7 @@ public class FlushConsolidationHandlerTest {
     public void testResend() throws Exception {
         final AtomicInteger flushCount = new AtomicInteger();
         final EmbeddedChannel channel = newChannel(flushCount, true);
-        channel.writeAndFlush(1L).addListener(new GenericFutureListener<Future<? super Void>>() {
-            @Override
-            public void operationComplete(Future<? super Void> future) throws Exception {
-                channel.writeAndFlush(1L);
-            }
-        });
+        channel.writeAndFlush(1L).addListener(future -> channel.writeAndFlush(1L));
         channel.flushOutbound();
         assertEquals(1L, (Long) channel.readOutbound());
         assertEquals(1L, (Long) channel.readOutbound());

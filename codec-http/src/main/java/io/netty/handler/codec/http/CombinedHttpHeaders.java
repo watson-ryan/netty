@@ -16,6 +16,8 @@
 package io.netty.handler.codec.http;
 
 import io.netty.handler.codec.DefaultHeaders;
+import io.netty.handler.codec.DefaultHeaders.NameValidator;
+import io.netty.handler.codec.DefaultHeaders.ValueValidator;
 import io.netty.handler.codec.Headers;
 import io.netty.handler.codec.ValueConverter;
 import io.netty.util.HashingStrategy;
@@ -25,9 +27,11 @@ import java.util.Collection;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.function.BiPredicate;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.SET_COOKIE;
 import static io.netty.util.AsciiString.CASE_INSENSITIVE_HASHER;
+import static io.netty.util.internal.ObjectUtil.checkNotNull;
 import static io.netty.util.internal.StringUtil.COMMA;
 import static io.netty.util.internal.StringUtil.unescapeCsvFields;
 
@@ -37,9 +41,36 @@ import static io.netty.util.internal.StringUtil.unescapeCsvFields;
  * Please refer to section <a href="https://tools.ietf.org/html/rfc7230#section-3.2.2">RFC 7230, 3.2.2</a>.
  */
 public class CombinedHttpHeaders extends DefaultHttpHeaders {
+    /**
+     * Create a combined HTTP header object, with optional validation.
+     *
+     * @param validate Should Netty validate header values to ensure they aren't malicious.
+     * @deprecated Prefer instead to configuring a {@link HttpHeadersFactory}
+     * by calling {@link DefaultHttpHeadersFactory#withCombiningHeaders(boolean) withCombiningHeaders(true)}
+     * on {@link DefaultHttpHeadersFactory#headersFactory()}.
+     */
+    @Deprecated
     public CombinedHttpHeaders(boolean validate) {
         super(new CombinedHttpHeadersImpl(CASE_INSENSITIVE_HASHER, valueConverter(), nameValidator(validate),
                 valueValidator(validate)));
+    }
+
+    CombinedHttpHeaders(NameValidator<CharSequence> nameValidator, ValueValidator<CharSequence> valueValidator) {
+        super(new CombinedHttpHeadersImpl(
+                CASE_INSENSITIVE_HASHER,
+                valueConverter(),
+                checkNotNull(nameValidator, "nameValidator"),
+                checkNotNull(valueValidator, "valueValidator")));
+    }
+
+    CombinedHttpHeaders(
+            NameValidator<CharSequence> nameValidator, ValueValidator<CharSequence> valueValidator, int sizeHint) {
+        super(new CombinedHttpHeadersImpl(
+                CASE_INSENSITIVE_HASHER,
+                valueConverter(),
+                checkNotNull(nameValidator, "nameValidator"),
+                checkNotNull(valueValidator, "valueValidator"),
+                sizeHint));
     }
 
     @Override
@@ -91,7 +122,15 @@ public class CombinedHttpHeaders extends DefaultHttpHeaders {
                                 ValueConverter<CharSequence> valueConverter,
                                 NameValidator<CharSequence> nameValidator,
                                 ValueValidator<CharSequence> valueValidator) {
-            super(nameHashingStrategy, valueConverter, nameValidator, 16, valueValidator);
+            this(nameHashingStrategy, valueConverter, nameValidator, valueValidator, 16);
+        }
+
+        CombinedHttpHeadersImpl(HashingStrategy<CharSequence> nameHashingStrategy,
+                                ValueConverter<CharSequence> valueConverter,
+                                NameValidator<CharSequence> nameValidator,
+                                ValueValidator<CharSequence> valueValidator,
+                                int sizeHint) {
+            super(nameHashingStrategy, valueConverter, nameValidator, sizeHint, valueValidator);
         }
 
         @Override
@@ -105,6 +144,18 @@ public class CombinedHttpHeaders extends DefaultHttpHeaders {
                 throw new IllegalStateException("CombinedHttpHeaders should only have one value");
             }
             return unescapedItr;
+        }
+
+        @Override
+        public boolean containsAny(CharSequence name, CharSequence predicateArg,
+                                   BiPredicate<? super CharSequence, ? super CharSequence> valuePredicate) {
+            Iterator<CharSequence> itr = valueIterator(name);
+            while (itr.hasNext()) {
+                if (valuePredicate.test(itr.next(), predicateArg)) {
+                    return true;
+                }
+            }
+            return false;
         }
 
         @Override

@@ -16,7 +16,6 @@
 package io.netty.resolver.dns;
 
 import io.netty.util.NetUtil;
-import io.netty.util.internal.PlatformDependent;
 import org.apache.directory.server.dns.DnsServer;
 import org.apache.directory.server.dns.io.decoder.DnsMessageDecoder;
 import org.apache.directory.server.dns.io.encoder.DnsMessageEncoder;
@@ -55,6 +54,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.ThreadLocalRandom;
 
 class TestDnsServer extends DnsServer {
     private static final Map<String, byte[]> BYTES = new HashMap<String, byte[]>();
@@ -85,14 +85,18 @@ class TestDnsServer extends DnsServer {
 
     @Override
     public void start() throws IOException {
-        start(false);
+        start(null);
     }
 
     /**
-     * Start the {@link TestDnsServer} but drop all {@code AAAA} queries and not send any response to these at all.
+     * Start the {@link TestDnsServer} but drop all {@link RecordType} queries
+     * and not send any response to these at all.
      */
-    public void start(final boolean dropAAAAQueries) throws IOException {
-        InetSocketAddress address = new InetSocketAddress(NetUtil.LOCALHOST4, 0);
+    public void start(final RecordType dropRecordType) throws IOException {
+        start(dropRecordType, new InetSocketAddress(NetUtil.LOCALHOST4, 0));
+    }
+
+    public void start(final RecordType dropRecordType, InetSocketAddress address) throws IOException {
         UdpTransport transport = new UdpTransport(address.getHostName(), address.getPort());
         setTransports(transport);
 
@@ -104,7 +108,7 @@ class TestDnsServer extends DnsServer {
                 // USe our own codec to support AAAA testing
                 session.getFilterChain()
                         .addFirst("codec", new ProtocolCodecFilter(
-                                new TestDnsProtocolUdpCodecFactory(dropAAAAQueries)));
+                                new TestDnsProtocolUdpCodecFactory(dropRecordType)));
             }
         });
 
@@ -152,10 +156,10 @@ class TestDnsServer extends DnsServer {
     private final class TestDnsProtocolUdpCodecFactory implements ProtocolCodecFactory {
         private final DnsMessageEncoder encoder = new DnsMessageEncoder();
         private final TestAAAARecordEncoder recordEncoder = new TestAAAARecordEncoder();
-        private final boolean dropAAAArecords;
+        private final RecordType dropRecordType;
 
-        TestDnsProtocolUdpCodecFactory(boolean dropAAAArecords) {
-            this.dropAAAArecords = dropAAAArecords;
+        TestDnsProtocolUdpCodecFactory(RecordType dropRecordType) {
+            this.dropRecordType = dropRecordType;
         }
 
         @Override
@@ -164,28 +168,37 @@ class TestDnsServer extends DnsServer {
 
                 @Override
                 public void encode(IoSession session, Object message, ProtocolEncoderOutput out) {
-                    IoBuffer buf = IoBuffer.allocate(1024);
+                    IoBuffer buf = IoBuffer.allocate(4096);
                     DnsMessage dnsMessage = filterMessage((DnsMessage) message);
-                    encoder.encode(buf, dnsMessage);
-                    for (ResourceRecord record : dnsMessage.getAnswerRecords()) {
-                        // This is a hack to allow to also test for AAAA resolution as DnsMessageEncoder
-                        // does not support it and it is hard to extend, because the interesting methods
-                        // are private...
-                        // In case of RecordType.AAAA we need to encode the RecordType by ourselves.
-                        if (record.getRecordType() == RecordType.AAAA) {
-                            try {
-                                recordEncoder.put(buf, record);
-                            } catch (IOException e) {
-                                // Should never happen
-                                throw new IllegalStateException(e);
-                            }
-                        }
-                    }
-                    buf.flip();
+                    if (dnsMessage != null) {
+                        encoder.encode(buf, dnsMessage);
 
-                    out.write(buf);
+                        encodeAAAA(dnsMessage.getAnswerRecords(), buf);
+                        encodeAAAA(dnsMessage.getAuthorityRecords(), buf);
+                        encodeAAAA(dnsMessage.getAdditionalRecords(), buf);
+                        buf.flip();
+
+                        out.write(buf);
+                    }
                 }
             };
+        }
+
+        private void encodeAAAA(List<ResourceRecord> records, IoBuffer out) {
+            for (ResourceRecord record : records) {
+                // This is a hack to allow to also test for AAAA resolution as DnsMessageEncoder
+                // does not support it and it is hard to extend, because the interesting methods
+                // are private...
+                // In case of RecordType.AAAA we need to encode the RecordType by ourselves.
+                if (record.getRecordType() == RecordType.AAAA) {
+                    try {
+                        recordEncoder.put(out, record);
+                    } catch (IOException e) {
+                        // Should never happen
+                        throw new IllegalStateException(e);
+                    }
+                }
+            }
         }
 
         @Override
@@ -196,9 +209,9 @@ class TestDnsServer extends DnsServer {
                 @Override
                 public void decode(IoSession session, IoBuffer in, ProtocolDecoderOutput out) throws IOException {
                     DnsMessage message = decoder.decode(in);
-                    if (dropAAAArecords) {
+                    if (dropRecordType != null) {
                         for (QuestionRecord record: message.getQuestionRecords()) {
-                            if (record.getRecordType() == RecordType.AAAA) {
+                            if (record.getRecordType() == dropRecordType) {
                                 return;
                             }
                         }
@@ -281,7 +294,7 @@ class TestDnsServer extends DnsServer {
         }
 
         private static int index(int arrayLength) {
-            return Math.abs(PlatformDependent.threadLocalRandom().nextInt()) % arrayLength;
+            return Math.abs(ThreadLocalRandom.current().nextInt()) % arrayLength;
         }
 
         private static String nextDomain() {
@@ -315,19 +328,19 @@ class TestDnsServer extends DnsServer {
                     case A:
                         do {
                             attr.put(DnsAttribute.IP_ADDRESS.toLowerCase(Locale.US), nextIp());
-                        } while (PlatformDependent.threadLocalRandom().nextBoolean());
+                        } while (ThreadLocalRandom.current().nextBoolean());
                         break;
                     case AAAA:
                         do {
                             attr.put(DnsAttribute.IP_ADDRESS.toLowerCase(Locale.US), nextIp6());
-                        } while (PlatformDependent.threadLocalRandom().nextBoolean());
+                        } while (ThreadLocalRandom.current().nextBoolean());
                         break;
                     case MX:
                         int priority = 0;
                         do {
                             attr.put(DnsAttribute.DOMAIN_NAME.toLowerCase(Locale.US), nextDomain());
                             attr.put(DnsAttribute.MX_PREFERENCE.toLowerCase(Locale.US), String.valueOf(++priority));
-                        } while (PlatformDependent.threadLocalRandom().nextBoolean());
+                        } while (ThreadLocalRandom.current().nextBoolean());
                         break;
                     default:
                         return null;

@@ -17,11 +17,11 @@ package io.netty.handler.codec.http2;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
-import io.netty.channel.DefaultEventLoopGroup;
+import io.netty.channel.EventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.local.LocalIoHandler;
 import io.netty.handler.codec.http2.Http2Connection.Endpoint;
 import io.netty.handler.codec.http2.Http2Stream.State;
-import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.FutureListener;
 import io.netty.util.concurrent.Promise;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
@@ -59,7 +59,7 @@ public class DefaultHttp2ConnectionTest {
 
     private DefaultHttp2Connection server;
     private DefaultHttp2Connection client;
-    private static DefaultEventLoopGroup group;
+    private static EventLoopGroup group;
 
     @Mock
     private Http2Connection.Listener clientListener;
@@ -69,7 +69,7 @@ public class DefaultHttp2ConnectionTest {
 
     @BeforeAll
     public static void beforeClass() {
-        group = new DefaultEventLoopGroup(2);
+        group = new MultiThreadIoEventLoopGroup(2, LocalIoHandler.newFactory());
     }
 
     @AfterAll
@@ -166,12 +166,9 @@ public class DefaultHttp2ConnectionTest {
         client.forEachActiveStream(new Http2StreamVisitor() {
             @Override
             public boolean visit(Http2Stream stream) {
-                client.close(promise).addListener(new FutureListener<Void>() {
-                    @Override
-                    public void operationComplete(Future<Void> future) throws Exception {
-                        assertTrue(promise.isDone());
-                        latch.countDown();
-                    }
+                client.close(promise).addListener(future -> {
+                    assertTrue(promise.isDone());
+                    latch.countDown();
                 });
                 return true;
             }
@@ -202,12 +199,9 @@ public class DefaultHttp2ConnectionTest {
                 }
             });
         } catch (Http2Exception ignored) {
-            client.close(promise).addListener(new FutureListener<Void>() {
-                @Override
-                public void operationComplete(Future<Void> future) throws Exception {
-                    assertTrue(promise.isDone());
-                    latch.countDown();
-                }
+            client.close(promise).addListener(future -> {
+                assertTrue(promise.isDone());
+                latch.countDown();
             });
         }
         assertTrue(latch.await(5, TimeUnit.SECONDS));
@@ -570,7 +564,7 @@ public class DefaultHttp2ConnectionTest {
     public void listenerThrowShouldNotPreventOtherListenersFromBeingNotified() throws Http2Exception {
         final boolean[] calledArray = new boolean[128];
         // The following setup will ensure that clientListener throws exceptions, and marks a value in an array
-        // such that clientListener2 will verify that is is set or fail the test.
+        // such that clientListener2 will verify that is set or fail the test.
         int methodIndex = 0;
         doAnswer(new ListenerExceptionThrower(calledArray, methodIndex))
             .when(clientListener).onStreamAdded(any(Http2Stream.class));
@@ -652,15 +646,38 @@ public class DefaultHttp2ConnectionTest {
         }
     }
 
+    @Test
+    public void clientLastStreamCreatedWithoutStreamCreated() {
+        assertEquals(0, client.local().lastStreamCreated());
+    }
+
+    @Test
+    public void serverLastStreamCreatedWithoutStreamCreated() {
+        assertEquals(0, server.local().lastStreamCreated());
+    }
+
+    @Test
+    public void clientCreateMaxStreamId() throws Exception {
+        int id = MAX_VALUE;
+        client.local().createStream(id, false);
+        assertTrue(client.streamMayHaveExisted(id));
+        assertEquals(id, client.local().lastStreamCreated());
+    }
+
+    @Test
+    public void serverCreateMaxStreamId() throws Exception {
+        int id = MAX_VALUE - 1;
+        server.local().createStream(id, false);
+        assertTrue(server.streamMayHaveExisted(id));
+        assertEquals(id, server.local().lastStreamCreated());
+    }
+
     private void testRemoveAllStreams() throws InterruptedException {
         final CountDownLatch latch = new CountDownLatch(1);
         final Promise<Void> promise = group.next().newPromise();
-        client.close(promise).addListener(new FutureListener<Void>() {
-            @Override
-            public void operationComplete(Future<Void> future) throws Exception {
-                assertTrue(promise.isDone());
-                latch.countDown();
-            }
+        client.close(promise).addListener(future -> {
+            assertTrue(promise.isDone());
+            latch.countDown();
         });
         assertTrue(latch.await(5, TimeUnit.SECONDS));
     }

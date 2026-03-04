@@ -19,13 +19,13 @@ import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.Channel.Unsafe;
 import io.netty.channel.ChannelDuplexHandler;
-import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPromise;
 import io.netty.util.concurrent.Future;
+import io.netty.util.concurrent.Ticker;
 import io.netty.util.internal.ObjectUtil;
 
 import java.util.concurrent.TimeUnit;
@@ -99,19 +99,12 @@ import java.util.concurrent.TimeUnit;
 public class IdleStateHandler extends ChannelDuplexHandler {
     private static final long MIN_TIMEOUT_NANOS = TimeUnit.MILLISECONDS.toNanos(1);
 
-    // Not create a new ChannelFutureListener per write operation to reduce GC pressure.
-    private final ChannelFutureListener writeListener = new ChannelFutureListener() {
-        @Override
-        public void operationComplete(ChannelFuture future) throws Exception {
-            lastWriteTime = ticksInNanos();
-            firstWriterIdleEvent = firstAllIdleEvent = true;
-        }
-    };
-
     private final boolean observeOutput;
     private final long readerIdleTimeNanos;
     private final long writerIdleTimeNanos;
     private final long allIdleTimeNanos;
+
+    private Ticker ticker = Ticker.systemTicker();
 
     private Future<?> readerIdleTimeout;
     private long lastReadTime;
@@ -124,13 +117,21 @@ public class IdleStateHandler extends ChannelDuplexHandler {
     private Future<?> allIdleTimeout;
     private boolean firstAllIdleEvent = true;
 
-    private byte state; // 0 - none, 1 - initialized, 2 - destroyed
+    private byte state;
+    private static final byte ST_INITIALIZED = 1;
+    private static final byte ST_DESTROYED = 2;
+
     private boolean reading;
 
     private long lastChangeCheckTimeStamp;
     private int lastMessageHashCode;
     private long lastPendingWriteBytes;
     private long lastFlushProgress;
+    // Not create a new ChannelFutureListener per write operation to reduce GC pressure.
+    private final ChannelFutureListener writeListener = future -> {
+        lastWriteTime = ticker.nanoTime();
+        firstWriterIdleEvent = firstAllIdleEvent = true;
+    };
 
     /**
      * Creates a new instance firing {@link IdleStateEvent}s.
@@ -238,6 +239,7 @@ public class IdleStateHandler extends ChannelDuplexHandler {
 
     @Override
     public void handlerAdded(ChannelHandlerContext ctx) throws Exception {
+        this.ticker = ctx.executor().ticker();
         if (ctx.channel().isActive() && ctx.channel().isRegistered()) {
             // channelActive() event has been fired already, which means this.channelActive() will
             // not be invoked. We have to initialize here instead.
@@ -289,7 +291,7 @@ public class IdleStateHandler extends ChannelDuplexHandler {
     @Override
     public void channelReadComplete(ChannelHandlerContext ctx) throws Exception {
         if ((readerIdleTimeNanos > 0 || allIdleTimeNanos > 0) && reading) {
-            lastReadTime = ticksInNanos();
+            lastReadTime = ticker.nanoTime();
             reading = false;
         }
         ctx.fireChannelReadComplete();
@@ -305,6 +307,25 @@ public class IdleStateHandler extends ChannelDuplexHandler {
         }
     }
 
+    /**
+     * Reset the read timeout. As this handler is not thread-safe, this method <b>must</b> be called on the event loop.
+     */
+    public void resetReadTimeout() {
+        if (readerIdleTimeNanos > 0 || allIdleTimeNanos > 0) {
+            lastReadTime = ticker.nanoTime();
+            reading = false;
+        }
+    }
+
+    /**
+     * Reset the write timeout. As this handler is not thread-safe, this method <b>must</b> be called on the event loop.
+     */
+    public void resetWriteTimeout() {
+        if (writerIdleTimeNanos > 0 || allIdleTimeNanos > 0) {
+            lastWriteTime = ticker.nanoTime();
+        }
+    }
+
     private void initialize(ChannelHandlerContext ctx) {
         // Avoid the case where destroy() is called before scheduling timeouts.
         // See: https://github.com/netty/netty/issues/143
@@ -316,10 +337,10 @@ public class IdleStateHandler extends ChannelDuplexHandler {
              break;
         }
 
-        state = 1;
+        state = ST_INITIALIZED;
         initOutputChanged(ctx);
 
-        lastReadTime = lastWriteTime = ticksInNanos();
+        lastReadTime = lastWriteTime = ticker.nanoTime();
         if (readerIdleTimeNanos > 0) {
             readerIdleTimeout = schedule(ctx, new ReaderIdleTimeoutTask(ctx),
                     readerIdleTimeNanos, TimeUnit.NANOSECONDS);
@@ -337,19 +358,12 @@ public class IdleStateHandler extends ChannelDuplexHandler {
     /**
      * This method is visible for testing!
      */
-    long ticksInNanos() {
-        return System.nanoTime();
-    }
-
-    /**
-     * This method is visible for testing!
-     */
     Future<?> schedule(ChannelHandlerContext ctx, Runnable task, long delay, TimeUnit unit) {
         return ctx.executor().schedule(task, delay, unit);
     }
 
     private void destroy() {
-        state = 2;
+        state = ST_DESTROYED;
 
         if (readerIdleTimeout != null) {
             readerIdleTimeout.cancel(false);
@@ -488,7 +502,7 @@ public class IdleStateHandler extends ChannelDuplexHandler {
         protected void run(ChannelHandlerContext ctx) {
             long nextDelay = readerIdleTimeNanos;
             if (!reading) {
-                nextDelay -= ticksInNanos() - lastReadTime;
+                nextDelay -= ticker.nanoTime() - lastReadTime;
             }
 
             if (nextDelay <= 0) {
@@ -521,7 +535,7 @@ public class IdleStateHandler extends ChannelDuplexHandler {
         protected void run(ChannelHandlerContext ctx) {
 
             long lastWriteTime = IdleStateHandler.this.lastWriteTime;
-            long nextDelay = writerIdleTimeNanos - (ticksInNanos() - lastWriteTime);
+            long nextDelay = writerIdleTimeNanos - (ticker.nanoTime() - lastWriteTime);
             if (nextDelay <= 0) {
                 // Writer is idle - set a new timeout and notify the callback.
                 writerIdleTimeout = schedule(ctx, this, writerIdleTimeNanos, TimeUnit.NANOSECONDS);
@@ -557,7 +571,7 @@ public class IdleStateHandler extends ChannelDuplexHandler {
 
             long nextDelay = allIdleTimeNanos;
             if (!reading) {
-                nextDelay -= ticksInNanos() - Math.max(lastReadTime, lastWriteTime);
+                nextDelay -= ticker.nanoTime() - Math.max(lastReadTime, lastWriteTime);
             }
             if (nextDelay <= 0) {
                 // Both reader and writer are idle - set a new timeout and

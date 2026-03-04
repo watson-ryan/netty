@@ -30,7 +30,6 @@ import java.util.concurrent.ThreadFactory;
 
 /**
  * Abstract base class for {@link EventLoop}s that execute all its submitted tasks in a single thread.
- *
  */
 public abstract class SingleThreadEventLoop extends SingleThreadEventExecutor implements EventLoop {
 
@@ -43,28 +42,59 @@ public abstract class SingleThreadEventLoop extends SingleThreadEventExecutor im
         this(parent, threadFactory, addTaskWakesUp, DEFAULT_MAX_PENDING_TASKS, RejectedExecutionHandlers.reject());
     }
 
+    protected SingleThreadEventLoop(EventLoopGroup parent, ThreadFactory threadFactory,
+                                    boolean addTaskWakesUp, boolean supportSuspension) {
+        this(parent, threadFactory, addTaskWakesUp, supportSuspension, DEFAULT_MAX_PENDING_TASKS,
+                RejectedExecutionHandlers.reject());
+    }
+
     protected SingleThreadEventLoop(EventLoopGroup parent, Executor executor, boolean addTaskWakesUp) {
-        this(parent, executor, addTaskWakesUp, DEFAULT_MAX_PENDING_TASKS, RejectedExecutionHandlers.reject());
+        this(parent, executor, addTaskWakesUp, false);
+    }
+
+    protected SingleThreadEventLoop(EventLoopGroup parent, Executor executor,
+                                    boolean addTaskWakesUp, boolean supportSuspension) {
+        this(parent, executor, addTaskWakesUp, supportSuspension, DEFAULT_MAX_PENDING_TASKS,
+                RejectedExecutionHandlers.reject());
     }
 
     protected SingleThreadEventLoop(EventLoopGroup parent, ThreadFactory threadFactory,
                                     boolean addTaskWakesUp, int maxPendingTasks,
                                     RejectedExecutionHandler rejectedExecutionHandler) {
-        super(parent, threadFactory, addTaskWakesUp, maxPendingTasks, rejectedExecutionHandler);
+        this(parent, threadFactory, addTaskWakesUp, false, maxPendingTasks, rejectedExecutionHandler);
+    }
+
+    protected SingleThreadEventLoop(EventLoopGroup parent, ThreadFactory threadFactory,
+                                    boolean addTaskWakesUp, boolean supportSuspension, int maxPendingTasks,
+                                    RejectedExecutionHandler rejectedExecutionHandler) {
+        super(parent, threadFactory, addTaskWakesUp, supportSuspension, maxPendingTasks, rejectedExecutionHandler);
         tailTasks = newTaskQueue(maxPendingTasks);
     }
 
     protected SingleThreadEventLoop(EventLoopGroup parent, Executor executor,
                                     boolean addTaskWakesUp, int maxPendingTasks,
                                     RejectedExecutionHandler rejectedExecutionHandler) {
-        super(parent, executor, addTaskWakesUp, maxPendingTasks, rejectedExecutionHandler);
+        this(parent, executor, addTaskWakesUp, false, maxPendingTasks, rejectedExecutionHandler);
+    }
+
+    protected SingleThreadEventLoop(EventLoopGroup parent, Executor executor,
+                                    boolean addTaskWakesUp, boolean supportSuspension, int maxPendingTasks,
+                                    RejectedExecutionHandler rejectedExecutionHandler) {
+        super(parent, executor, addTaskWakesUp, supportSuspension, maxPendingTasks, rejectedExecutionHandler);
         tailTasks = newTaskQueue(maxPendingTasks);
     }
 
     protected SingleThreadEventLoop(EventLoopGroup parent, Executor executor,
                                     boolean addTaskWakesUp, Queue<Runnable> taskQueue, Queue<Runnable> tailTaskQueue,
                                     RejectedExecutionHandler rejectedExecutionHandler) {
-        super(parent, executor, addTaskWakesUp, taskQueue, rejectedExecutionHandler);
+        this(parent, executor, addTaskWakesUp, false, taskQueue, tailTaskQueue, rejectedExecutionHandler);
+    }
+
+    protected SingleThreadEventLoop(EventLoopGroup parent, Executor executor,
+                                    boolean addTaskWakesUp, boolean supportSuspension,
+                                    Queue<Runnable> taskQueue, Queue<Runnable> tailTaskQueue,
+                                    RejectedExecutionHandler rejectedExecutionHandler) {
+        super(parent, executor, addTaskWakesUp, supportSuspension, taskQueue, rejectedExecutionHandler);
         tailTasks = ObjectUtil.checkNotNull(tailTaskQueue, "tailTaskQueue");
     }
 
@@ -104,7 +134,6 @@ public abstract class SingleThreadEventLoop extends SingleThreadEventExecutor im
      *
      * @param task to be added.
      */
-    @UnstableApi
     public final void executeAfterEventLoopIteration(Runnable task) {
         ObjectUtil.checkNotNull(task, "task");
         if (isShutdown()) {
@@ -115,7 +144,7 @@ public abstract class SingleThreadEventLoop extends SingleThreadEventExecutor im
             reject(task);
         }
 
-        if (!(task instanceof LazyRunnable) && wakesUpForTask(task)) {
+        if (wakesUpForTask(task)) {
             wakeup(inEventLoop());
         }
     }
@@ -127,7 +156,6 @@ public abstract class SingleThreadEventLoop extends SingleThreadEventExecutor im
      *
      * @return {@code true} if the task was removed as a result of this call.
      */
-    @UnstableApi
     final boolean removeAfterEventLoopIterationTask(Runnable task) {
         return tailTasks.remove(ObjectUtil.checkNotNull(task, "task"));
     }

@@ -20,6 +20,8 @@ import io.netty.channel.ChannelPipeline;
 import io.netty.handler.codec.MessageAggregator;
 import io.netty.handler.codec.TooLongFrameException;
 
+import static io.netty.util.internal.StringUtil.className;
+
 /**
  * Handler that aggregate fragmented WebSocketFrame's.
  *
@@ -36,7 +38,7 @@ public class WebSocketFrameAggregator
      *                         a {@link TooLongFrameException} is thrown.
      */
     public WebSocketFrameAggregator(int maxContentLength) {
-        super(maxContentLength);
+        super(maxContentLength, WebSocketFrame.class);
     }
 
     @Override
@@ -94,6 +96,6 @@ public class WebSocketFrameAggregator
         }
 
         // Should not reach here.
-        throw new Error();
+        throw new Error("Unexpected websocket frame type: " + className(start));
     }
 }

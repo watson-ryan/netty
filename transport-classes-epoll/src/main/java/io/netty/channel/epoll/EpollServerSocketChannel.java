@@ -16,9 +16,9 @@
 package io.netty.channel.epoll;
 
 import io.netty.channel.Channel;
-import io.netty.channel.EventLoop;
 import io.netty.channel.socket.InternetProtocolFamily;
 import io.netty.channel.socket.ServerSocketChannel;
+import io.netty.channel.socket.SocketProtocolFamily;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -42,10 +42,19 @@ public final class EpollServerSocketChannel extends AbstractEpollServerChannel i
     private volatile Collection<InetAddress> tcpMd5SigAddresses = Collections.emptyList();
 
     public EpollServerSocketChannel() {
-        this((InternetProtocolFamily) null);
+        this((SocketProtocolFamily) null);
     }
 
+    /**
+     * @deprecated  use {@link EpollServerSocketChannel#EpollServerSocketChannel(SocketProtocolFamily)}
+     */
+    @Deprecated
     public EpollServerSocketChannel(InternetProtocolFamily protocol) {
+        super(newSocketStream(protocol), false);
+        config = new EpollServerSocketChannelConfig(this);
+    }
+
+    public EpollServerSocketChannel(SocketProtocolFamily protocol) {
         super(newSocketStream(protocol), false);
         config = new EpollServerSocketChannelConfig(this);
     }
@@ -67,11 +76,6 @@ public final class EpollServerSocketChannel extends AbstractEpollServerChannel i
     }
 
     @Override
-    protected boolean isCompatible(EventLoop loop) {
-        return loop instanceof EpollEventLoop;
-    }
-
-    @Override
     protected void doBind(SocketAddress localAddress) throws Exception {
         super.doBind(localAddress);
         final int tcpFastopen;
@@ -80,6 +84,8 @@ public final class EpollServerSocketChannel extends AbstractEpollServerChannel i
         }
         socket.listen(config.getBacklog());
         active = true;
+        // We now listen for new connections, submit the ops so we receive events.
+        submitCurrentOps();
     }
 
     @Override

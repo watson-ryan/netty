@@ -15,36 +15,43 @@
  */
 package io.netty.util.internal;
 
-import io.netty.util.CharsetUtil;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
+import jdk.jfr.FlightRecorder;
+import org.jctools.queues.MpmcArrayQueue;
 import org.jctools.queues.MpscArrayQueue;
 import org.jctools.queues.MpscChunkedArrayQueue;
 import org.jctools.queues.MpscUnboundedArrayQueue;
 import org.jctools.queues.SpscLinkedQueue;
+import org.jctools.queues.atomic.MpmcAtomicArrayQueue;
 import org.jctools.queues.atomic.MpscAtomicArrayQueue;
 import org.jctools.queues.atomic.MpscChunkedAtomicArrayQueue;
 import org.jctools.queues.atomic.MpscUnboundedAtomicArrayQueue;
 import org.jctools.queues.atomic.SpscLinkedAtomicQueue;
+import org.jctools.queues.atomic.unpadded.MpscAtomicUnpaddedArrayQueue;
+import org.jctools.queues.unpadded.MpscUnpaddedArrayQueue;
 import org.jctools.util.Pow2;
 import org.jctools.util.UnsafeAccess;
 
 import java.io.BufferedReader;
 import java.io.File;
-import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStreamReader;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
 import java.lang.reflect.Field;
-import java.lang.reflect.Method;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.security.AccessController;
 import java.security.PrivilegedAction;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Deque;
-import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -55,7 +62,7 @@ import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedDeque;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.LinkedBlockingDeque;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -67,6 +74,7 @@ import static io.netty.util.internal.PlatformDependent0.hashCodeAsciiSanitize;
 import static io.netty.util.internal.PlatformDependent0.unalignedAccess;
 import static java.lang.Math.max;
 import static java.lang.Math.min;
+import static java.lang.invoke.MethodType.methodType;
 
 /**
  * Utility that detects various properties specific to the current runtime
@@ -80,15 +88,14 @@ public final class PlatformDependent {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(PlatformDependent.class);
 
-    private static final Pattern MAX_DIRECT_MEMORY_SIZE_ARG_PATTERN = Pattern.compile(
-            "\\s*-XX:MaxDirectMemorySize\\s*=\\s*([0-9]+)\\s*([kKmMgG]?)\\s*$");
-
+    private static Pattern MAX_DIRECT_MEMORY_SIZE_ARG_PATTERN;
     private static final boolean MAYBE_SUPER_USER;
 
     private static final boolean CAN_ENABLE_TCP_NODELAY_BY_DEFAULT = !isAndroid();
 
     private static final Throwable UNSAFE_UNAVAILABILITY_CAUSE = unsafeUnavailabilityCause0();
     private static final boolean DIRECT_BUFFER_PREFERRED;
+    private static final boolean EXPLICIT_NO_PREFER_DIRECT;
     private static final long MAX_DIRECT_MEMORY = estimateMaxDirectMemory();
 
     private static final int MPSC_CHUNK_SIZE =  1024;
@@ -103,8 +110,6 @@ public final class PlatformDependent {
     private static final String NORMALIZED_ARCH = normalizeArch(SystemPropertyUtil.get("os.arch", ""));
     private static final String NORMALIZED_OS = normalizeOs(SystemPropertyUtil.get("os.name", ""));
 
-    // keep in sync with maven's pom.xml via os.detection.classifierWithLikes!
-    private static final String[] ALLOWED_LINUX_OS_CLASSIFIERS = {"fedora", "suse", "arch"};
     private static final Set<String> LINUX_OS_CLASSIFIERS;
 
     private static final boolean IS_WINDOWS = isWindows0();
@@ -116,16 +121,35 @@ public final class PlatformDependent {
     private static final boolean USE_DIRECT_BUFFER_NO_CLEANER;
     private static final AtomicLong DIRECT_MEMORY_COUNTER;
     private static final long DIRECT_MEMORY_LIMIT;
-    private static final ThreadLocalRandomProvider RANDOM_PROVIDER;
     private static final Cleaner CLEANER;
-    private static final int UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD;
-    // For specifications, see https://www.freedesktop.org/software/systemd/man/os-release.html
-    private static final String[] OS_RELEASE_FILES = {"/etc/os-release", "/usr/lib/os-release"};
+    private static final Cleaner DIRECT_CLEANER;
+    private static final Cleaner LEGACY_CLEANER;
+    private static final boolean HAS_ALLOCATE_UNINIT_ARRAY;
     private static final String LINUX_ID_PREFIX = "ID=";
     private static final String LINUX_ID_LIKE_PREFIX = "ID_LIKE=";
     public static final boolean BIG_ENDIAN_NATIVE_ORDER = ByteOrder.nativeOrder() == ByteOrder.BIG_ENDIAN;
 
+    private static final boolean JFR;
+    private static final boolean VAR_HANDLE;
+
     private static final Cleaner NOOP = new Cleaner() {
+        @Override
+        public CleanableDirectBuffer allocate(int capacity) {
+            return new CleanableDirectBuffer() {
+                private final ByteBuffer byteBuffer = ByteBuffer.allocateDirect(capacity);
+
+                @Override
+                public ByteBuffer buffer() {
+                    return byteBuffer;
+                }
+
+                @Override
+                public void clean() {
+                    // NOOP
+                }
+            };
+        }
+
         @Override
         public void freeDirectBuffer(ByteBuffer buffer) {
             // NOOP
@@ -133,23 +157,6 @@ public final class PlatformDependent {
     };
 
     static {
-        if (javaVersion() >= 7) {
-            RANDOM_PROVIDER = new ThreadLocalRandomProvider() {
-                @Override
-                @SuppressJava6Requirement(reason = "Usage guarded by java version check")
-                public Random current() {
-                    return java.util.concurrent.ThreadLocalRandom.current();
-                }
-            };
-        } else {
-            RANDOM_PROVIDER = new ThreadLocalRandomProvider() {
-                @Override
-                public Random current() {
-                    return ThreadLocalRandom.current();
-                }
-            };
-        }
-
         // Here is how the system property is used:
         //
         // * <  0  - Don't use cleaner, and inherit max direct memory from java. In this case the
@@ -161,9 +168,11 @@ public final class PlatformDependent {
 
         if (maxDirectMemory == 0 || !hasUnsafe() || !PlatformDependent0.hasDirectBufferNoCleanerConstructor()) {
             USE_DIRECT_BUFFER_NO_CLEANER = false;
+            DIRECT_CLEANER = NOOP;
             DIRECT_MEMORY_COUNTER = null;
         } else {
             USE_DIRECT_BUFFER_NO_CLEANER = true;
+            DIRECT_CLEANER = new DirectCleaner();
             if (maxDirectMemory < 0) {
                 maxDirectMemory = MAX_DIRECT_MEMORY;
                 if (maxDirectMemory <= 0) {
@@ -177,12 +186,7 @@ public final class PlatformDependent {
         }
         logger.debug("-Dio.netty.maxDirectMemory: {} bytes", maxDirectMemory);
         DIRECT_MEMORY_LIMIT = maxDirectMemory >= 1 ? maxDirectMemory : MAX_DIRECT_MEMORY;
-
-        int tryAllocateUninitializedArray =
-                SystemPropertyUtil.getInt("io.netty.uninitializedArrayAllocationThreshold", 1024);
-        UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD = javaVersion() >= 9 && PlatformDependent0.hasAllocateArrayMethod() ?
-                tryAllocateUninitializedArray : -1;
-        logger.debug("-Dio.netty.uninitializedArrayAllocationThreshold: {}", UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD);
+        HAS_ALLOCATE_UNINIT_ARRAY = javaVersion() >= 9 && PlatformDependent0.hasAllocateArrayMethod();
 
         MAYBE_SUPER_USER = maybeSuperUser0();
 
@@ -190,19 +194,37 @@ public final class PlatformDependent {
             // only direct to method if we are not running on android.
             // See https://github.com/netty/netty/issues/2604
             if (javaVersion() >= 9) {
-                CLEANER = CleanerJava9.isSupported() ? new CleanerJava9() : NOOP;
+                // Try Java 9 cleaner first, because it's based on Unsafe and can skip a few steps.
+                if (CleanerJava9.isSupported()) {
+                    LEGACY_CLEANER = new CleanerJava9();
+                } else if (CleanerJava24Linker.isSupported()) {
+                    // On Java 24+ we'd like to not use Unsafe because it produces warnings. We have MemorySegment,
+                    // but we cannot use "shared" arenas due to JDK bugs.
+                    // If the "linker" implementation is supported, then we have native access permissions
+                    // in the "io.netty.common" module, and we can link directly to malloc() and free() from libc.
+                    LEGACY_CLEANER = new CleanerJava24Linker();
+                } else if (CleanerJava25.isSupported()) {
+                    // On Java 25+ we can't use Unsafe, but we have functioning MemorySegment support.
+                    // We don't have native access permissions to link malloc() and free() directly, but we can
+                    // use shared memory segment instances.
+                    LEGACY_CLEANER = new CleanerJava25();
+                } else {
+                    LEGACY_CLEANER = NOOP;
+                }
             } else {
-                CLEANER = CleanerJava6.isSupported() ? new CleanerJava6() : NOOP;
+                LEGACY_CLEANER = CleanerJava6.isSupported() ? new CleanerJava6() : NOOP;
             }
         } else {
-            CLEANER = NOOP;
+            LEGACY_CLEANER = NOOP;
         }
+        CLEANER = USE_DIRECT_BUFFER_NO_CLEANER ? DIRECT_CLEANER : LEGACY_CLEANER;
 
+        EXPLICIT_NO_PREFER_DIRECT = SystemPropertyUtil.getBoolean("io.netty.noPreferDirect", false);
         // We should always prefer direct buffers by default if we can use a Cleaner to release direct buffers.
         DIRECT_BUFFER_PREFERRED = CLEANER != NOOP
-                                  && !SystemPropertyUtil.getBoolean("io.netty.noPreferDirect", false);
+                                  && !EXPLICIT_NO_PREFER_DIRECT;
         if (logger.isDebugEnabled()) {
-            logger.debug("-Dio.netty.noPreferDirect: {}", !DIRECT_BUFFER_PREFERRED);
+            logger.debug("-Dio.netty.noPreferDirect: {}", EXPLICIT_NO_PREFER_DIRECT);
         }
 
         /*
@@ -216,73 +238,104 @@ public final class PlatformDependent {
                     "instability.");
         }
 
-        final Set<String> allowedClassifiers = Collections.unmodifiableSet(
-                new HashSet<String>(Arrays.asList(ALLOWED_LINUX_OS_CLASSIFIERS)));
-        final Set<String> availableClassifiers = new LinkedHashSet<String>();
+        final Set<String> availableClassifiers = new LinkedHashSet<>();
 
-        if (!addPropertyOsClassifiers(allowedClassifiers, availableClassifiers)) {
-            addFilesystemOsClassifiers(allowedClassifiers, availableClassifiers);
+        if (!addPropertyOsClassifiers(availableClassifiers)) {
+            addFilesystemOsClassifiers(availableClassifiers);
         }
         LINUX_OS_CLASSIFIERS = Collections.unmodifiableSet(availableClassifiers);
+
+        boolean jfrAvailable;
+        Throwable jfrFailure = null;
+        try {
+            //noinspection Since15
+            jfrAvailable = FlightRecorder.isAvailable();
+        } catch (Throwable t) {
+            jfrFailure = t;
+            jfrAvailable = false;
+        }
+        JFR = SystemPropertyUtil.getBoolean("io.netty.jfr.enabled", jfrAvailable);
+        if (logger.isTraceEnabled() && jfrFailure != null) {
+            logger.debug("-Dio.netty.jfr.enabled: {}", JFR, jfrFailure);
+        } else if (logger.isDebugEnabled()) {
+            logger.debug("-Dio.netty.jfr.enabled: {}", JFR);
+        }
+        VAR_HANDLE = initializeVarHandle();
     }
 
-    static void addFilesystemOsClassifiers(final Set<String> allowedClassifiers,
-                                           final Set<String> availableClassifiers) {
-        for (final String osReleaseFileName : OS_RELEASE_FILES) {
-            final File file = new File(osReleaseFileName);
-            boolean found = AccessController.doPrivileged(new PrivilegedAction<Boolean>() {
-                @Override
-                public Boolean run() {
-                    try {
-                        if (file.exists()) {
-                            BufferedReader reader = null;
-                            try {
-                                reader = new BufferedReader(
-                                        new InputStreamReader(
-                                                new FileInputStream(file), CharsetUtil.UTF_8));
+    private static boolean initializeVarHandle() {
+        if (javaVersion() < 9 ||
+                PlatformDependent0.isNativeImage()) {
+            return false;
+        }
+        boolean varHandleAvailable = false;
+        Throwable varHandleFailure;
+        try {
+            VarHandle.storeStoreFence();
+            varHandleAvailable = VarHandleFactory.isSupported();
+            varHandleFailure = VarHandleFactory.unavailableCause();
+        } catch (Throwable t) {
+            // no-op
+            varHandleFailure = t;
+        }
+        if (varHandleFailure != null) {
+            logger.debug("java.lang.invoke.VarHandle: unavailable, reason: {}", varHandleFailure.toString());
+        } else {
+            logger.debug("java.lang.invoke.VarHandle: available");
+        }
+        boolean varHandleEnabled = varHandleAvailable &&
+                SystemPropertyUtil.getBoolean("io.netty.varHandle.enabled", varHandleAvailable);
+        if (logger.isTraceEnabled() && varHandleFailure != null) {
+            logger.debug("-Dio.netty.varHandle.enabled: {}", varHandleEnabled, varHandleFailure);
+        } else if (logger.isDebugEnabled()) {
+            logger.debug("-Dio.netty.varHandle.enabled: {}", varHandleEnabled);
+        }
+        return varHandleEnabled;
+    }
 
-                                String line;
-                                while ((line = reader.readLine()) != null) {
-                                    if (line.startsWith(LINUX_ID_PREFIX)) {
-                                        String id = normalizeOsReleaseVariableValue(
-                                                line.substring(LINUX_ID_PREFIX.length()));
-                                        addClassifier(allowedClassifiers, availableClassifiers, id);
-                                    } else if (line.startsWith(LINUX_ID_LIKE_PREFIX)) {
-                                        line = normalizeOsReleaseVariableValue(
-                                                line.substring(LINUX_ID_LIKE_PREFIX.length()));
-                                        addClassifier(allowedClassifiers, availableClassifiers, line.split("[ ]+"));
-                                    }
-                                }
-                            } catch (SecurityException e) {
-                                logger.debug("Unable to read {}", osReleaseFileName, e);
-                            } catch (IOException e) {
-                                logger.debug("Error while reading content of {}", osReleaseFileName, e);
-                            } finally {
-                                if (reader != null) {
-                                    try {
-                                        reader.close();
-                                    } catch (IOException ignored) {
-                                        // Ignore
-                                    }
-                                }
+    // For specifications, see https://www.freedesktop.org/software/systemd/man/os-release.html
+    static void addFilesystemOsClassifiers(final Set<String> availableClassifiers) {
+        if (processOsReleaseFile("/etc/os-release", availableClassifiers)) {
+            return;
+        }
+        processOsReleaseFile("/usr/lib/os-release", availableClassifiers);
+    }
+
+    private static boolean processOsReleaseFile(String osReleaseFileName, Set<String> availableClassifiers) {
+        Path file = Paths.get(osReleaseFileName);
+        return AccessController.doPrivileged((PrivilegedAction<Boolean>) () -> {
+            try {
+                if (Files.exists(file)) {
+                    try (BufferedReader reader = new BufferedReader(new InputStreamReader(
+                            new BoundedInputStream(Files.newInputStream(file)), StandardCharsets.UTF_8))) {
+                        String line;
+                        while ((line = reader.readLine()) != null) {
+                            if (line.startsWith(LINUX_ID_PREFIX)) {
+                                String id = normalizeOsReleaseVariableValue(
+                                        line.substring(LINUX_ID_PREFIX.length()));
+                                addClassifier(availableClassifiers, id);
+                            } else if (line.startsWith(LINUX_ID_LIKE_PREFIX)) {
+                                line = normalizeOsReleaseVariableValue(
+                                        line.substring(LINUX_ID_LIKE_PREFIX.length()));
+                                addClassifier(availableClassifiers, line.split(" "));
                             }
-                            // specification states we should only fall back if /etc/os-release does not exist
-                            return true;
                         }
                     } catch (SecurityException e) {
-                        logger.debug("Unable to check if {} exists", osReleaseFileName, e);
+                        logger.debug("Unable to read {}", osReleaseFileName, e);
+                    } catch (IOException e) {
+                        logger.debug("Error while reading content of {}", osReleaseFileName, e);
                     }
-                    return false;
+                    // specification states we should only fall back if /etc/os-release does not exist
+                    return true;
                 }
-            });
-
-            if (found) {
-                break;
+            } catch (SecurityException e) {
+                logger.debug("Unable to check if {} exists", osReleaseFileName, e);
             }
-        }
+            return false;
+        });
     }
 
-    static boolean addPropertyOsClassifiers(Set<String> allowedClassifiers, Set<String> availableClassifiers) {
+    static boolean addPropertyOsClassifiers(Set<String> availableClassifiers) {
         // empty: -Dio.netty.osClassifiers (no distro specific classifiers for native libs)
         // single ID: -Dio.netty.osClassifiers=ubuntu
         // pair ID, ID_LIKE: -Dio.netty.osClassifiers=ubuntu,debian
@@ -308,7 +361,7 @@ public final class PlatformDependent {
                     osClassifiersPropertyName + " property contains more than 2 classifiers: " + osClassifiers);
         }
         for (String classifier : classifiers) {
-            addClassifier(allowedClassifiers, availableClassifiers, classifier);
+            addClassifier(availableClassifiers, classifier);
         }
         return true;
     }
@@ -322,8 +375,7 @@ public final class PlatformDependent {
     }
 
     public static byte[] allocateUninitializedArray(int size) {
-        return UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD < 0 || UNINITIALIZED_ARRAY_ALLOCATION_THRESHOLD > size ?
-                new byte[size] : PlatformDependent0.allocateUninitializedArray(size);
+        return HAS_ALLOCATE_UNINIT_ARRAY ?  PlatformDependent0.allocateUninitializedArray(size) : new byte[size];
     }
 
     /**
@@ -363,6 +415,14 @@ public final class PlatformDependent {
     }
 
     /**
+     * @param thread The thread to be checked.
+     * @return {@code true} if this {@link Thread} is a virtual thread, {@code false} otherwise.
+     */
+    public static boolean isVirtualThread(Thread thread) {
+        return PlatformDependent0.isVirtualThread(thread);
+    }
+
+    /**
      * Returns {@code true} if and only if it is fine to enable TCP_NODELAY socket option by default.
      */
     public static boolean canEnableTcpNoDelayByDefault() {
@@ -399,6 +459,23 @@ public final class PlatformDependent {
      */
     public static boolean directBufferPreferred() {
         return DIRECT_BUFFER_PREFERRED;
+    }
+
+    /**
+     * Returns {@code true} if user has specified
+     * {@code -Dio.netty.noPreferDirect=true} option.
+     */
+    public static boolean isExplicitNoPreferDirect() {
+        return EXPLICIT_NO_PREFER_DIRECT;
+    }
+
+    /**
+     * Return {@code true} if the selected cleaner can free direct buffers in a controlled way. This guarantee only
+     * applies for buffers allocated via {@link #allocateDirect(int)} and when using the {@code clean} method of the
+     * returned {@link CleanableDirectBuffer}.
+     */
+    public static boolean canReliabilyFreeDirectBuffers() {
+        return CLEANER != NOOP;
     }
 
     /**
@@ -456,71 +533,84 @@ public final class PlatformDependent {
      * Raises an exception bypassing compiler checks for checked exceptions.
      */
     public static void throwException(Throwable t) {
-        if (hasUnsafe()) {
-            PlatformDependent0.throwException(t);
-        } else {
-            PlatformDependent.<RuntimeException>throwException0(t);
-        }
-    }
-
-    @SuppressWarnings("unchecked")
-    private static <E extends Throwable> void throwException0(Throwable t) throws E {
-        throw (E) t;
+        PlatformDependent0.throwException(t);
     }
 
     /**
      * Creates a new fastest {@link ConcurrentMap} implementation for the current platform.
+     * @deprecated please use new ConcurrentHashMap<K, V>() directly.
      */
+    @Deprecated
     public static <K, V> ConcurrentMap<K, V> newConcurrentHashMap() {
-        return new ConcurrentHashMap<K, V>();
+        return new ConcurrentHashMap<>();
     }
 
     /**
      * Creates a new fastest {@link LongCounter} implementation for the current platform.
+     * @deprecated please use {@link java.util.concurrent.atomic.LongAdder} instead.
      */
+    @Deprecated
     public static LongCounter newLongCounter() {
-        if (javaVersion() >= 8) {
-            return new LongAdderCounter();
-        } else {
-            return new AtomicLongCounter();
-        }
+        return new LongAdderCounter();
     }
 
     /**
      * Creates a new fastest {@link ConcurrentMap} implementation for the current platform.
+     * @deprecated please use new ConcurrentHashMap<K, V>() directly.
      */
+    @Deprecated
     public static <K, V> ConcurrentMap<K, V> newConcurrentHashMap(int initialCapacity) {
-        return new ConcurrentHashMap<K, V>(initialCapacity);
+        return new ConcurrentHashMap<>(initialCapacity);
     }
 
     /**
      * Creates a new fastest {@link ConcurrentMap} implementation for the current platform.
+     * @deprecated please use new ConcurrentHashMap<K, V>() directly.
      */
+    @Deprecated
     public static <K, V> ConcurrentMap<K, V> newConcurrentHashMap(int initialCapacity, float loadFactor) {
-        return new ConcurrentHashMap<K, V>(initialCapacity, loadFactor);
+        return new ConcurrentHashMap<>(initialCapacity, loadFactor);
     }
 
     /**
      * Creates a new fastest {@link ConcurrentMap} implementation for the current platform.
+     * @deprecated please use new ConcurrentHashMap<K, V>() directly.
      */
+    @Deprecated
     public static <K, V> ConcurrentMap<K, V> newConcurrentHashMap(
             int initialCapacity, float loadFactor, int concurrencyLevel) {
-        return new ConcurrentHashMap<K, V>(initialCapacity, loadFactor, concurrencyLevel);
+        return new ConcurrentHashMap<>(initialCapacity, loadFactor, concurrencyLevel);
     }
 
     /**
      * Creates a new fastest {@link ConcurrentMap} implementation for the current platform.
+     * @deprecated please use new ConcurrentHashMap<K, V>() directly.
      */
+    @Deprecated
     public static <K, V> ConcurrentMap<K, V> newConcurrentHashMap(Map<? extends K, ? extends V> map) {
-        return new ConcurrentHashMap<K, V>(map);
+        return new ConcurrentHashMap<>(map);
+    }
+
+    /**
+     * Allocate a direct {@link ByteBuffer} of the given capacity, and return it alongside its deallocation mechanism.
+     * @param capacity The desired capacity of the direct byte buffer.
+     * @return The {@link CleanableDirectBuffer} instance that contain the buffer and its deallocation mechanism.
+     */
+    public static CleanableDirectBuffer allocateDirect(int capacity) {
+        return CLEANER.allocate(capacity);
     }
 
     /**
      * Try to deallocate the specified direct {@link ByteBuffer}. Please note this method does nothing if
      * the current platform does not support this operation or the specified buffer is not a direct buffer.
+     *
+     * @deprecated Use the {@link CleanableDirectBuffer#clean()} from {@link #allocateDirect(int)} instead.
      */
+    @Deprecated
     public static void freeDirectBuffer(ByteBuffer buffer) {
-        CLEANER.freeDirectBuffer(buffer);
+        // Use the LEGACY_CLEANER reference to avoid using the DIRECT_CLEANER implementation
+        // that just calls #freeDirectNoCleaner(ByteBuffer).
+        LEGACY_CLEANER.freeDirectBuffer(buffer);
     }
 
     public static long directBufferAddress(ByteBuffer buffer) {
@@ -535,24 +625,147 @@ public final class PlatformDependent {
                 "sun.misc.Unsafe or java.nio.DirectByteBuffer.<init>(long, int) not available");
     }
 
+    public static boolean hasVarHandle() {
+        return VAR_HANDLE;
+    }
+
+    /**
+     * {@code true} if {@code VarHandle} should be used for multi-byte access.
+     *
+     * The multi-byte access strategy is determined as follows:
+     * 1) If the platform supports unaligned access natively, use {@code Unsafe} as the fastest option.
+     * 2) Otherwise, if {@code VarHandle} is available, use it as a fallback.
+     * 3) Otherwise, fall back to manual byte-by-byte access.
+     */
+    public static boolean useVarHandleForMultiByteAccess() {
+        return !isUnaligned() && VAR_HANDLE;
+    }
+
+    /**
+     * {@code true} if multi-byte access at arbitrary offsets is possible, either natively through {@code Unsafe}
+     * or via {@code VarHandle} where the JVM handles alignment and byte ordering internally.
+     */
+    public static boolean canUnalignedAccess() {
+        return isUnaligned() || VAR_HANDLE;
+    }
+
+    public static VarHandle findVarHandleOfIntField(MethodHandles.Lookup lookup, Class<?> type, String fieldName) {
+        if (VAR_HANDLE) {
+            return VarHandleFactory.privateFindVarHandle(lookup, type, fieldName, int.class);
+        }
+        return null;
+    }
+
+    public static VarHandle intBeArrayView() {
+        if (VAR_HANDLE) {
+            return VarHandleFactory.intBeArrayView();
+        }
+        return null;
+    }
+
+    public static VarHandle intLeArrayView() {
+        if (VAR_HANDLE) {
+            return VarHandleFactory.intLeArrayView();
+        }
+        return null;
+    }
+
+    public static VarHandle longBeArrayView() {
+        if (VAR_HANDLE) {
+            return VarHandleFactory.longBeArrayView();
+        }
+        return null;
+    }
+
+    public static VarHandle longLeArrayView() {
+        if (VAR_HANDLE) {
+            return VarHandleFactory.longLeArrayView();
+        }
+        return null;
+    }
+
+    public static VarHandle shortBeArrayView() {
+        if (VAR_HANDLE) {
+            return VarHandleFactory.shortBeArrayView();
+        }
+        return null;
+    }
+
+    public static VarHandle shortLeArrayView() {
+        if (VAR_HANDLE) {
+            return VarHandleFactory.shortLeArrayView();
+        }
+        return null;
+    }
+
+    public static VarHandle longBeByteBufferView() {
+        if (VAR_HANDLE) {
+            return VarHandleFactory.longBeByteBufferView();
+        }
+        return null;
+    }
+
+    public static VarHandle longLeByteBufferView() {
+        if (VAR_HANDLE) {
+            return VarHandleFactory.longLeByteBufferView();
+        }
+        return null;
+    }
+
+    public static VarHandle intBeByteBufferView() {
+        if (VAR_HANDLE) {
+            return VarHandleFactory.intBeByteBufferView();
+        }
+        return null;
+    }
+
+    public static VarHandle intLeByteBufferView() {
+        if (VAR_HANDLE) {
+            return VarHandleFactory.intLeByteBufferView();
+        }
+        return null;
+    }
+
+    public static VarHandle shortBeByteBufferView() {
+        if (VAR_HANDLE) {
+            return VarHandleFactory.shortBeByteBufferView();
+        }
+        return null;
+    }
+
+    public static VarHandle shortLeByteBufferView() {
+        if (VAR_HANDLE) {
+            return VarHandleFactory.shortLeByteBufferView();
+        }
+        return null;
+    }
+
     public static Object getObject(Object object, long fieldOffset) {
         return PlatformDependent0.getObject(object, fieldOffset);
+    }
+
+    public static int getVolatileInt(Object object, long fieldOffset) {
+        return PlatformDependent0.getIntVolatile(object, fieldOffset);
     }
 
     public static int getInt(Object object, long fieldOffset) {
         return PlatformDependent0.getInt(object, fieldOffset);
     }
 
+    public static void putOrderedInt(Object object, long fieldOffset, int value) {
+        PlatformDependent0.putOrderedInt(object, fieldOffset, value);
+    }
+
+    public static int getAndAddInt(Object object, long fieldOffset, int delta) {
+        return PlatformDependent0.getAndAddInt(object, fieldOffset, delta);
+    }
+
+    public static boolean compareAndSwapInt(Object object, long fieldOffset, int expected, int value) {
+        return PlatformDependent0.compareAndSwapInt(object, fieldOffset, expected, value);
+    }
+
     static void safeConstructPutInt(Object object, long fieldOffset, int value) {
         PlatformDependent0.safeConstructPutInt(object, fieldOffset, value);
-    }
-
-    public static int getIntVolatile(long address) {
-        return PlatformDependent0.getIntVolatile(address);
-    }
-
-    public static void putIntOrdered(long adddress, int newValue) {
-        PlatformDependent0.putIntOrdered(adddress, newValue);
     }
 
     public static byte getByte(long address) {
@@ -572,31 +785,35 @@ public final class PlatformDependent {
     }
 
     public static byte getByte(byte[] data, int index) {
-        return PlatformDependent0.getByte(data, index);
+        return hasUnsafe() ? PlatformDependent0.getByte(data, index) : data[index];
     }
 
     public static byte getByte(byte[] data, long index) {
-        return PlatformDependent0.getByte(data, index);
+        return hasUnsafe() ? PlatformDependent0.getByte(data, index) : data[toIntExact(index)];
     }
 
     public static short getShort(byte[] data, int index) {
-        return PlatformDependent0.getShort(data, index);
+        return hasUnsafe() ? PlatformDependent0.getShort(data, index) : data[index];
     }
 
     public static int getInt(byte[] data, int index) {
-        return PlatformDependent0.getInt(data, index);
+        return hasUnsafe() ? PlatformDependent0.getInt(data, index) : data[index];
     }
 
     public static int getInt(int[] data, long index) {
-        return PlatformDependent0.getInt(data, index);
+        return hasUnsafe() ? PlatformDependent0.getInt(data, index) : data[toIntExact(index)];
     }
 
     public static long getLong(byte[] data, int index) {
-        return PlatformDependent0.getLong(data, index);
+        return hasUnsafe() ? PlatformDependent0.getLong(data, index) : data[index];
     }
 
     public static long getLong(long[] data, long index) {
-        return PlatformDependent0.getLong(data, index);
+        return hasUnsafe() ? PlatformDependent0.getLong(data, index) : data[toIntExact(index)];
+    }
+
+    private static int toIntExact(long value) {
+        return Math.toIntExact(value);
     }
 
     private static long getLongSafe(byte[] bytes, int offset) {
@@ -782,6 +999,16 @@ public final class PlatformDependent {
     }
 
     /**
+     * Allocate a new {@link ByteBuffer} with the given {@code capacity}, inside a {@link CleanableDirectBuffer}.
+     * The {@link ByteBuffer} <strong>MUST</strong> be deallocated via the {@link CleanableDirectBuffer#clean()}
+     * of the returned {@link CleanableDirectBuffer} object.
+     */
+    public static CleanableDirectBuffer allocateDirectBufferNoCleaner(int capacity) {
+        assert USE_DIRECT_BUFFER_NO_CLEANER;
+        return DIRECT_CLEANER.allocate(capacity);
+    }
+
+    /**
      * Reallocate a new {@link ByteBuffer} with the given {@code capacity}. {@link ByteBuffer}s reallocated with
      * this method <strong>MUST</strong> be deallocated via {@link #freeDirectNoCleaner(ByteBuffer)}.
      */
@@ -797,6 +1024,18 @@ public final class PlatformDependent {
             throwException(e);
             return null;
         }
+    }
+
+    /**
+     * Reallocate a new {@link ByteBuffer} with the given {@code capacity}.
+     * The {@link ByteBuffer} is given as wrapped in its associated {@link CleanableDirectBuffer},
+     * and a new {@link CleanableDirectBuffer} instance will be returned.
+     * The {@link ByteBuffer}s reallocated with this method <strong>MUST</strong> be deallocated
+     * via the {@link CleanableDirectBuffer#clean()} method on the returned object.
+     */
+    public static CleanableDirectBuffer reallocateDirectBufferNoCleaner(CleanableDirectBuffer buffer, int capacity) {
+        assert USE_DIRECT_BUFFER_NO_CLEANER;
+        return ((DirectCleaner) DIRECT_CLEANER).reallocate(buffer, capacity);
     }
 
     /**
@@ -837,6 +1076,35 @@ public final class PlatformDependent {
         return Pow2.align(value, alignment);
     }
 
+    public static ByteBuffer offsetSlice(ByteBuffer buffer, int index, int length) {
+        if (PlatformDependent0.hasOffsetSliceMethod()) {
+            return PlatformDependent0.offsetSlice(buffer, index, length);
+        } else {
+            return ((ByteBuffer) buffer.duplicate().clear().position(index).limit(index + length)).slice();
+        }
+    }
+
+    public static ByteBuffer absolutePut(ByteBuffer dst, int dstOffset, byte[] src, int srcOffset, int length) {
+        if (PlatformDependent0.hasAbsolutePutArrayMethod()) {
+            return PlatformDependent0.absolutePut(dst, dstOffset, src, srcOffset, length);
+        } else {
+            ByteBuffer tmp = (ByteBuffer) dst.duplicate().clear().position(dstOffset).limit(dstOffset + length);
+            tmp.put(ByteBuffer.wrap(src, srcOffset, length));
+            return dst;
+        }
+    }
+
+    public static ByteBuffer absolutePut(ByteBuffer dst, int dstOffset, ByteBuffer src, int srcOffset, int length) {
+        if (PlatformDependent0.hasAbsolutePutBufferMethod()) {
+            return PlatformDependent0.absolutePut(dst, dstOffset, src, srcOffset, length);
+        } else {
+            ByteBuffer a = (ByteBuffer) dst.duplicate().clear().position(dstOffset).limit(dstOffset + length);
+            ByteBuffer b = (ByteBuffer) src.duplicate().clear().position(srcOffset).limit(srcOffset + length);
+            a.put(b);
+            return dst;
+        }
+    }
+
     private static void incrementMemoryCounter(int capacity) {
         if (DIRECT_MEMORY_COUNTER != null) {
             long newUsedMemory = DIRECT_MEMORY_COUNTER.addAndGet(capacity);
@@ -872,6 +1140,9 @@ public final class PlatformDependent {
      * by the caller.
      */
     public static boolean equals(byte[] bytes1, int startPos1, byte[] bytes2, int startPos2, int length) {
+        if (javaVersion() > 8 && (startPos2 | startPos1 | (bytes1.length - length) | bytes2.length - length) == 0) {
+            return Arrays.equals(bytes1, bytes2);
+        }
         return !hasUnsafe() || !unalignedAccess() ?
                   equalsSafe(bytes1, startPos1, bytes2, startPos2, length) :
                   PlatformDependent0.equals(bytes1, startPos1, bytes2, startPos2, length);
@@ -927,7 +1198,7 @@ public final class PlatformDependent {
      * The resulting hash code will be case insensitive.
      */
     public static int hashCodeAscii(byte[] bytes, int startPos, int length) {
-        return !hasUnsafe() || !unalignedAccess() ?
+        return !hasUnsafe() || !unalignedAccess() || BIG_ENDIAN_NATIVE_ORDER ?
                 hashCodeAsciiSafe(bytes, startPos, length) :
                 PlatformDependent0.hashCodeAscii(bytes, startPos, length);
     }
@@ -984,9 +1255,6 @@ public final class PlatformDependent {
 
     private static final class Mpsc {
         private static final boolean USE_MPSC_CHUNKED_ARRAY_QUEUE;
-
-        private Mpsc() {
-        }
 
         static {
             Object unsafe = null;
@@ -1074,6 +1342,23 @@ public final class PlatformDependent {
     }
 
     /**
+     * Create a new un-padded {@link Queue} which is safe to use for multiple producers (different threads) and a single
+     * consumer (one thread!) with the given fixes {@code capacity}.<br>
+     * This should be preferred to {@link #newFixedMpscQueue(int)} when the queue is not to be heavily contended.
+     */
+    public static <T> Queue<T> newFixedMpscUnpaddedQueue(int capacity) {
+        return hasUnsafe() ? new MpscUnpaddedArrayQueue<T>(capacity) : new MpscAtomicUnpaddedArrayQueue<T>(capacity);
+    }
+
+    /**
+     * Create a new {@link Queue} which is safe to use for multiple producers (different threads) and multiple
+     * consumers with the given fixes {@code capacity}.
+     */
+    public static <T> Queue<T> newFixedMpmcQueue(int capacity) {
+        return hasUnsafe() ? new MpmcArrayQueue<T>(capacity) : new MpmcAtomicArrayQueue<T>(capacity);
+    }
+
+    /**
      * Return the {@link ClassLoader} for the given {@link Class}.
      */
     public static ClassLoader getClassLoader(final Class<?> clazz) {
@@ -1097,20 +1382,17 @@ public final class PlatformDependent {
     /**
      * Returns a new concurrent {@link Deque}.
      */
-    @SuppressJava6Requirement(reason = "Usage guarded by java version check")
     public static <C> Deque<C> newConcurrentDeque() {
-        if (javaVersion() < 7) {
-            return new LinkedBlockingDeque<C>();
-        } else {
-            return new ConcurrentLinkedDeque<C>();
-        }
+        return new ConcurrentLinkedDeque<C>();
     }
 
     /**
      * Return a {@link Random} which is not-threadsafe and so can only be used from the same thread.
+     * @deprecated Use ThreadLocalRandom.current() instead.
      */
+    @Deprecated
     public static Random threadLocalRandom() {
-        return RANDOM_PROVIDER.current();
+        return ThreadLocalRandom.current();
     }
 
     private static boolean isWindows0() {
@@ -1157,7 +1439,7 @@ public final class PlatformDependent {
         try {
             boolean hasUnsafe = PlatformDependent0.hasUnsafe();
             logger.debug("sun.misc.Unsafe: {}", hasUnsafe ? "available" : "unavailable");
-            return hasUnsafe ? null : PlatformDependent0.getUnsafeUnavailabilityCause();
+            return null;
         } catch (Throwable t) {
             logger.trace("Could not determine if Unsafe is available", t);
             // Probably failed to initialize PlatformDependent0.
@@ -1190,6 +1472,16 @@ public final class PlatformDependent {
         return vmName.equals("IKVM.NET");
     }
 
+    private static Pattern getMaxDirectMemorySizeArgPattern() {
+        // Pattern's is immutable so it's always safe published
+        Pattern pattern = MAX_DIRECT_MEMORY_SIZE_ARG_PATTERN;
+        if (pattern == null) {
+            pattern = Pattern.compile("\\s*-XX:MaxDirectMemorySize\\s*=\\s*([0-9]+)\\s*([kKmMgG]?)\\s*$");
+            MAX_DIRECT_MEMORY_SIZE_ARG_PATTERN =  pattern;
+        }
+        return pattern;
+    }
+
     /**
      * Compute an estimate of the maximum amount of direct memory available to this JVM.
      * <p>
@@ -1199,30 +1491,9 @@ public final class PlatformDependent {
      *
      * @return The estimated max direct memory, in bytes.
      */
+    @SuppressWarnings("unchecked")
     public static long estimateMaxDirectMemory() {
-        long maxDirectMemory = 0;
-
-        ClassLoader systemClassLoader = null;
-        try {
-            systemClassLoader = getSystemClassLoader();
-
-            // When using IBM J9 / Eclipse OpenJ9 we should not use VM.maxDirectMemory() as it not reflects the
-            // correct value.
-            // See:
-            //  - https://github.com/netty/netty/issues/7654
-            String vmName = SystemPropertyUtil.get("java.vm.name", "").toLowerCase();
-            if (!vmName.startsWith("ibm j9") &&
-                    // https://github.com/eclipse/openj9/blob/openj9-0.8.0/runtime/include/vendor_version.h#L53
-                    !vmName.startsWith("eclipse openj9")) {
-                // Try to get from sun.misc.VM.maxDirectMemory() which should be most accurate.
-                Class<?> vmClass = Class.forName("sun.misc.VM", true, systemClassLoader);
-                Method m = vmClass.getDeclaredMethod("maxDirectMemory");
-                maxDirectMemory = ((Number) m.invoke(null)).longValue();
-            }
-        } catch (Throwable ignored) {
-            // Ignore
-        }
-
+        long maxDirectMemory = PlatformDependent0.bitsMaxDirectMemory();
         if (maxDirectMemory > 0) {
             return maxDirectMemory;
         }
@@ -1230,17 +1501,23 @@ public final class PlatformDependent {
         try {
             // Now try to get the JVM option (-XX:MaxDirectMemorySize) and parse it.
             // Note that we are using reflection because Android doesn't have these classes.
+            ClassLoader systemClassLoader = getSystemClassLoader();
             Class<?> mgmtFactoryClass = Class.forName(
                     "java.lang.management.ManagementFactory", true, systemClassLoader);
             Class<?> runtimeClass = Class.forName(
                     "java.lang.management.RuntimeMXBean", true, systemClassLoader);
 
-            Object runtime = mgmtFactoryClass.getDeclaredMethod("getRuntimeMXBean").invoke(null);
+            MethodHandles.Lookup lookup = MethodHandles.publicLookup();
+            MethodHandle getRuntime = lookup.findStatic(
+                    mgmtFactoryClass, "getRuntimeMXBean", methodType(runtimeClass));
+            MethodHandle getInputArguments = lookup.findVirtual(
+                    runtimeClass, "getInputArguments", methodType(List.class));
+            List<String> vmArgs = (List<String>) getInputArguments.invoke(getRuntime.invoke());
 
-            @SuppressWarnings("unchecked")
-            List<String> vmArgs = (List<String>) runtimeClass.getDeclaredMethod("getInputArguments").invoke(runtime);
+            Pattern maxDirectMemorySizeArgPattern = getMaxDirectMemorySizeArgPattern();
+
             for (int i = vmArgs.size() - 1; i >= 0; i --) {
-                Matcher m = MAX_DIRECT_MEMORY_SIZE_ARG_PATTERN.matcher(vmArgs.get(i));
+                Matcher m = maxDirectMemorySizeArgPattern.matcher(vmArgs.get(i));
                 if (!m.matches()) {
                     continue;
                 }
@@ -1478,98 +1755,127 @@ public final class PlatformDependent {
         return LINUX_OS_CLASSIFIERS;
     }
 
-    @SuppressJava6Requirement(reason = "Guarded by version check")
     public static File createTempFile(String prefix, String suffix, File directory) throws IOException {
-        if (javaVersion() >= 7) {
-            if (directory == null) {
-                return Files.createTempFile(prefix, suffix).toFile();
-            }
-            return Files.createTempFile(directory.toPath(), prefix, suffix).toFile();
-        }
-        final File file;
         if (directory == null) {
-            file = File.createTempFile(prefix, suffix);
-        } else {
-            file = File.createTempFile(prefix, suffix, directory);
+            return Files.createTempFile(prefix, suffix).toFile();
         }
-
-        // Try to adjust the perms, if this fails there is not much else we can do...
-        if (!file.setReadable(false, false)) {
-            throw new IOException("Failed to set permissions on temporary file " + file);
-        }
-        if (!file.setReadable(true, true)) {
-            throw new IOException("Failed to set permissions on temporary file " + file);
-        }
-        return file;
+        return Files.createTempFile(directory.toPath(), prefix, suffix).toFile();
     }
 
     /**
      * Adds only those classifier strings to <tt>dest</tt> which are present in <tt>allowed</tt>.
      *
-     * @param allowed          allowed classifiers
      * @param dest             destination set
      * @param maybeClassifiers potential classifiers to add
      */
-    private static void addClassifier(Set<String> allowed, Set<String> dest, String... maybeClassifiers) {
+    private static void addClassifier(Set<String> dest, String... maybeClassifiers) {
         for (String id : maybeClassifiers) {
-            if (allowed.contains(id)) {
+            if (isAllowedClassifier(id)) {
                 dest.add(id);
             }
         }
     }
-
-    private static String normalizeOsReleaseVariableValue(String value) {
-        // Variable assignment values may be enclosed in double or single quotes.
-        return value.trim().replaceAll("[\"']", "");
+    // keep in sync with maven's pom.xml via os.detection.classifierWithLikes!
+    private static boolean isAllowedClassifier(String classifier) {
+        switch (classifier) {
+            case "fedora":
+            case "suse":
+            case "arch":
+                return true;
+            default:
+                return false;
+        }
     }
 
+    //replaces value.trim().replaceAll("[\"']", "") to avoid regexp overhead
+    private static String normalizeOsReleaseVariableValue(String value) {
+        String trimmed = value.trim();
+        StringBuilder sb = new StringBuilder(trimmed.length());
+        for (int i = 0; i < trimmed.length(); i++) {
+            char c = trimmed.charAt(i);
+            if (c != '"' && c != '\'') {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
+    }
+
+    //replaces value.toLowerCase(Locale.US).replaceAll("[^a-z0-9]+", "") to avoid regexp overhead
     private static String normalize(String value) {
-        return value.toLowerCase(Locale.US).replaceAll("[^a-z0-9]+", "");
+        StringBuilder sb = new StringBuilder(value.length());
+        for (int i = 0; i < value.length(); i++) {
+            char c = Character.toLowerCase(value.charAt(i));
+            if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+                sb.append(c);
+            }
+        }
+        return sb.toString();
     }
 
     private static String normalizeArch(String value) {
         value = normalize(value);
-        if (value.matches("^(x8664|amd64|ia32e|em64t|x64)$")) {
-            return "x86_64";
-        }
-        if (value.matches("^(x8632|x86|i[3-6]86|ia32|x32)$")) {
-            return "x86_32";
-        }
-        if (value.matches("^(ia64|itanium64)$")) {
-            return "itanium_64";
-        }
-        if (value.matches("^(sparc|sparc32)$")) {
-            return "sparc_32";
-        }
-        if (value.matches("^(sparcv9|sparc64)$")) {
-            return "sparc_64";
-        }
-        if (value.matches("^(arm|arm32)$")) {
-            return "arm_32";
-        }
-        if ("aarch64".equals(value)) {
-            return "aarch_64";
-        }
-        if (value.matches("^(ppc|ppc32)$")) {
-            return "ppc_32";
-        }
-        if ("ppc64".equals(value)) {
-            return "ppc_64";
-        }
-        if ("ppc64le".equals(value)) {
-            return "ppcle_64";
-        }
-        if ("s390".equals(value)) {
-            return "s390_32";
-        }
-        if ("s390x".equals(value)) {
-            return "s390_64";
-        }
-        if ("loongarch64".equals(value)) {
-            return "loongarch_64";
-        }
+        switch (value) {
+            case "x8664":
+            case "amd64":
+            case "ia32e":
+            case "em64t":
+            case "x64":
+                return "x86_64";
 
-        return "unknown";
+            case "x8632":
+            case "x86":
+            case "i386":
+            case "i486":
+            case "i586":
+            case "i686":
+            case "ia32":
+            case "x32":
+                return "x86_32";
+
+            case "ia64":
+            case "itanium64":
+                return "itanium_64";
+
+            case "sparc":
+            case "sparc32":
+                return "sparc_32";
+
+            case "sparcv9":
+            case "sparc64":
+                return "sparc_64";
+
+            case "arm":
+            case "arm32":
+                return "arm_32";
+
+            case "aarch64":
+                return "aarch_64";
+
+            case "riscv64":
+                return "riscv64";
+
+            case "ppc":
+            case "ppc32":
+                return "ppc_32";
+
+            case "ppc64":
+                return "ppc_64";
+
+            case "ppc64le":
+                return "ppcle_64";
+
+            case "s390":
+                return "s390_32";
+
+            case "s390x":
+                return "s390_64";
+
+            case "loongarch64":
+                return "loongarch_64";
+
+            default:
+                return "unknown";
+        }
     }
 
     private static String normalizeOs(String value) {
@@ -1611,32 +1917,11 @@ public final class PlatformDependent {
         return "unknown";
     }
 
-    private static final class AtomicLongCounter extends AtomicLong implements LongCounter {
-        private static final long serialVersionUID = 4074772784610639305L;
-
-        @Override
-        public void add(long delta) {
-            addAndGet(delta);
-        }
-
-        @Override
-        public void increment() {
-            incrementAndGet();
-        }
-
-        @Override
-        public void decrement() {
-            decrementAndGet();
-        }
-
-        @Override
-        public long value() {
-            return get();
-        }
-    }
-
-    private interface ThreadLocalRandomProvider {
-        Random current();
+    /**
+     * Check if JFR events are supported on this platform.
+     */
+    public static boolean isJfrEnabled() {
+        return JFR;
     }
 
     private PlatformDependent() {

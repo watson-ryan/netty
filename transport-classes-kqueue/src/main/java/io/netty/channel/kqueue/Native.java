@@ -100,7 +100,7 @@ final class Native {
     static final int NOTE_RDHUP = NOTE_READCLOSED | NOTE_CONNRESET | NOTE_DISCONNECTED;
 
     // Commonly used combinations of EV defines
-    static final short EV_ADD_CLEAR_ENABLE = (short) (EV_ADD | EV_CLEAR | EV_ENABLE);
+    static final short EV_ADD_ENABLE = (short) (EV_ADD | EV_ENABLE);
     static final short EV_DELETE_DISABLE = (short) (EV_DELETE | EV_DISABLE);
 
     static final short EVFILT_READ = evfiltRead();
@@ -114,6 +114,15 @@ final class Native {
     static final int CONNECT_TCP_FASTOPEN = CONNECT_RESUME_ON_READ_WRITE | CONNECT_DATA_IDEMPOTENT;
     static final boolean IS_SUPPORTING_TCP_FASTOPEN_CLIENT = isSupportingFastOpenClient();
     static final boolean IS_SUPPORTING_TCP_FASTOPEN_SERVER = isSupportingFastOpenServer();
+
+    static final KQueueIoOps READ_ENABLED_OPS =
+            KQueueIoOps.newOps(Native.EVFILT_READ, Native.EV_ADD_ENABLE, 0);
+    static final KQueueIoOps WRITE_ENABLED_OPS =
+            KQueueIoOps.newOps(Native.EVFILT_WRITE, Native.EV_ADD_ENABLE, 0);
+    static final KQueueIoOps READ_DISABLED_OPS =
+            KQueueIoOps.newOps(Native.EVFILT_READ, Native.EV_DELETE_DISABLE, 0);
+    static final KQueueIoOps WRITE_DISABLED_OPS =
+            KQueueIoOps.newOps(Native.EVFILT_WRITE, Native.EV_DELETE_DISABLE, 0);
 
     static FileDescriptor newKQueue() {
         return new FileDescriptor(kqueueCreate());
@@ -142,6 +151,7 @@ final class Native {
     static native int offsetofKEventFFlags();
     static native int offsetofKEventFilter();
     static native int offsetofKeventData();
+    static native int offsetofKeventUdata();
 
     private static void loadNativeLibrary() {
         String name = PlatformDependent.normalizedOs();

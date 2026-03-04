@@ -21,9 +21,11 @@ import io.netty.handler.codec.http.FullHttpResponse;
 import io.netty.handler.codec.http.HttpHeaderNames;
 import io.netty.handler.codec.http.HttpHeaderValues;
 import io.netty.handler.codec.http.HttpHeaders;
+import io.netty.handler.codec.http.HttpMethod;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.util.CharsetUtil;
 
+import static io.netty.handler.codec.http.HttpMethod.GET;
 import static io.netty.handler.codec.http.HttpVersion.*;
 
 /**
@@ -134,9 +136,13 @@ public class WebSocketServerHandshaker13 extends WebSocketServerHandshaker {
      */
     @Override
     protected FullHttpResponse newHandshakeResponse(FullHttpRequest req, HttpHeaders headers) {
+        HttpMethod method = req.method();
+        if (!GET.equals(method)) {
+            throw new WebSocketServerHandshakeException("Invalid WebSocket handshake method: " + method, req);
+        }
+
         HttpHeaders reqHeaders = req.headers();
-        if (!reqHeaders.contains(HttpHeaderNames.CONNECTION) ||
-            !reqHeaders.containsValue(HttpHeaderNames.CONNECTION, HttpHeaderValues.UPGRADE, true)) {
+        if (!reqHeaders.containsValue(HttpHeaderNames.CONNECTION, HttpHeaderValues.UPGRADE, true)) {
             throw new WebSocketServerHandshakeException(
                     "not a WebSocket request: a |Connection| header must includes a token 'Upgrade'", req);
         }

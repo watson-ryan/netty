@@ -15,10 +15,7 @@
 
 package io.netty.handler.codec.http2;
 
-import io.netty.util.internal.PlatformDependent;
-import io.netty.util.internal.SuppressJava6Requirement;
 import io.netty.util.internal.ThrowableUtil;
-import io.netty.util.internal.UnstableApi;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -31,7 +28,6 @@ import static io.netty.util.internal.ObjectUtil.checkNotNull;
 /**
  * Exception thrown when an HTTP/2 error was encountered.
  */
-@UnstableApi
 public class Http2Exception extends Exception {
     private static final long serialVersionUID = -6941186345430164209L;
     private final Http2Error error;
@@ -68,17 +64,10 @@ public class Http2Exception extends Exception {
 
     static Http2Exception newStatic(Http2Error error, String message, ShutdownHint shutdownHint,
                                     Class<?> clazz, String method) {
-        final Http2Exception exception;
-        if (PlatformDependent.javaVersion() >= 7) {
-            exception = new StacklessHttp2Exception(error, message, shutdownHint, true);
-        } else {
-            exception = new StacklessHttp2Exception(error, message, shutdownHint);
-        }
+        final Http2Exception exception = new StacklessHttp2Exception(error, message, shutdownHint, true);
         return ThrowableUtil.unknownStackTrace(exception, clazz, method);
     }
 
-    @SuppressJava6Requirement(reason = "uses Java 7+ Exception.<init>(String, Throwable, boolean, boolean)" +
-            " but is guarded by version checks")
     private Http2Exception(Http2Error error, String message, ShutdownHint shutdownHint, boolean shared) {
         super(message, null, false, true);
         assert shared;

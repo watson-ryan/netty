@@ -16,6 +16,7 @@
 package io.netty.channel.epoll;
 
 import io.netty.buffer.ByteBufAllocator;
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelException;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.DefaultChannelConfig;
@@ -24,7 +25,8 @@ import io.netty.channel.RecvByteBufAllocator;
 import io.netty.channel.WriteBufferWaterMark;
 import io.netty.channel.unix.IntegerUnixChannelOption;
 import io.netty.channel.unix.RawUnixChannelOption;
-import io.netty.util.internal.ObjectUtil;
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.io.IOException;
 import java.nio.ByteBuffer;
@@ -33,14 +35,28 @@ import java.util.Map;
 import static io.netty.channel.unix.Limits.SSIZE_MAX;
 
 public class EpollChannelConfig extends DefaultChannelConfig {
+
+    private static final InternalLogger LOGGER = InternalLoggerFactory.getInstance(EpollChannelConfig.class);
+
     private volatile long maxBytesPerGatheringWrite = SSIZE_MAX;
 
-    EpollChannelConfig(AbstractEpollChannel channel) {
-        super(channel);
+    protected EpollChannelConfig(Channel channel) {
+        super(checkAbstractEpollChannel(channel));
     }
 
-    EpollChannelConfig(AbstractEpollChannel channel, RecvByteBufAllocator recvByteBufAllocator) {
-        super(channel, recvByteBufAllocator);
+    protected EpollChannelConfig(Channel channel, RecvByteBufAllocator recvByteBufAllocator) {
+        super(checkAbstractEpollChannel(channel), recvByteBufAllocator);
+    }
+
+    protected LinuxSocket socket() {
+        return ((AbstractEpollChannel) channel).socket;
+    }
+
+    private static Channel checkAbstractEpollChannel(Channel channel) {
+        if (!(channel instanceof AbstractEpollChannel)) {
+            throw new IllegalArgumentException("channel is not AbstractEpollChannel: " + channel.getClass());
+        }
+        return channel;
     }
 
     @Override
@@ -168,10 +184,12 @@ public class EpollChannelConfig extends DefaultChannelConfig {
      * {@link EpollMode#EDGE_TRIGGERED}. If you want to use {@link #isAutoRead()} {@code false} or
      * {@link #getMaxMessagesPerRead()} and have an accurate behaviour you should use
      * {@link EpollMode#LEVEL_TRIGGERED}.
+     *
+     * @deprecated Netty always uses level-triggered mode and so this method is just a no-op.
      */
+    @Deprecated
     public EpollMode getEpollMode() {
-        return ((AbstractEpollChannel) channel).isFlagSet(Native.EPOLLET)
-                ? EpollMode.EDGE_TRIGGERED : EpollMode.LEVEL_TRIGGERED;
+        return EpollMode.LEVEL_TRIGGERED;
     }
 
     /**
@@ -181,26 +199,12 @@ public class EpollChannelConfig extends DefaultChannelConfig {
      * {@link EpollMode#LEVEL_TRIGGERED}.
      *
      * <strong>Be aware this config setting can only be adjusted before the channel was registered.</strong>
+     *
+     * @deprecated Netty always uses level-triggered mode and so this method is just a no-op.
      */
+    @Deprecated
     public EpollChannelConfig setEpollMode(EpollMode mode) {
-        ObjectUtil.checkNotNull(mode, "mode");
-
-        try {
-            switch (mode) {
-            case EDGE_TRIGGERED:
-                checkChannelNotRegistered();
-                ((AbstractEpollChannel) channel).setFlag(Native.EPOLLET);
-                break;
-            case LEVEL_TRIGGERED:
-                checkChannelNotRegistered();
-                ((AbstractEpollChannel) channel).clearFlag(Native.EPOLLET);
-                break;
-            default:
-                throw new Error();
-            }
-        } catch (IOException e) {
-            throw new ChannelException(e);
-        }
+        LOGGER.debug("Changing the EpollMode is not supported anymore, this is just a no-op");
         return this;
     }
 
@@ -215,11 +219,11 @@ public class EpollChannelConfig extends DefaultChannelConfig {
         ((AbstractEpollChannel) channel).clearEpollIn();
     }
 
-    final void setMaxBytesPerGatheringWrite(long maxBytesPerGatheringWrite) {
+    protected final void setMaxBytesPerGatheringWrite(long maxBytesPerGatheringWrite) {
         this.maxBytesPerGatheringWrite = maxBytesPerGatheringWrite;
     }
 
-    final long getMaxBytesPerGatheringWrite() {
+    protected final long getMaxBytesPerGatheringWrite() {
         return maxBytesPerGatheringWrite;
     }
 }

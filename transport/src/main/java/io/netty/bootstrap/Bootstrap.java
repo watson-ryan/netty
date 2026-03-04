@@ -23,9 +23,9 @@ import io.netty.channel.ChannelPromise;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
 import io.netty.resolver.AddressResolver;
+import io.netty.resolver.AddressResolverGroup;
 import io.netty.resolver.DefaultAddressResolverGroup;
 import io.netty.resolver.NameResolver;
-import io.netty.resolver.AddressResolverGroup;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.FutureListener;
 import io.netty.util.internal.ObjectUtil;
@@ -35,6 +35,7 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
 import java.net.InetAddress;
 import java.net.InetSocketAddress;
 import java.net.SocketAddress;
+import java.util.Collection;
 
 /**
  * A {@link Bootstrap} that makes it easy to bootstrap a {@link Channel} to use
@@ -47,20 +48,18 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
 
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(Bootstrap.class);
 
-    private static final AddressResolverGroup<?> DEFAULT_RESOLVER = DefaultAddressResolverGroup.INSTANCE;
-
     private final BootstrapConfig config = new BootstrapConfig(this);
 
-    @SuppressWarnings("unchecked")
-    private volatile AddressResolverGroup<SocketAddress> resolver =
-            (AddressResolverGroup<SocketAddress>) DEFAULT_RESOLVER;
+    private ExternalAddressResolver externalResolver;
+    private volatile boolean disableResolver;
     private volatile SocketAddress remoteAddress;
 
     public Bootstrap() { }
 
     private Bootstrap(Bootstrap bootstrap) {
         super(bootstrap);
-        resolver = bootstrap.resolver;
+        externalResolver = bootstrap.externalResolver;
+        disableResolver = bootstrap.disableResolver;
         remoteAddress = bootstrap.remoteAddress;
     }
 
@@ -72,9 +71,19 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
      *
      * @see io.netty.resolver.DefaultAddressResolverGroup
      */
-    @SuppressWarnings("unchecked")
     public Bootstrap resolver(AddressResolverGroup<?> resolver) {
-        this.resolver = (AddressResolverGroup<SocketAddress>) (resolver == null ? DEFAULT_RESOLVER : resolver);
+        externalResolver = resolver == null ? null : new ExternalAddressResolver(resolver);
+        disableResolver = false;
+        return this;
+    }
+
+    /**
+     * Disables address name resolution. Name resolution may be re-enabled with
+     * {@link Bootstrap#resolver(AddressResolverGroup)}
+     */
+    public Bootstrap disableResolver() {
+        externalResolver = null;
+        disableResolver = true;
         return this;
     }
 
@@ -163,22 +172,19 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
         } else {
             // Registration future is almost always fulfilled already, but just in case it's not.
             final PendingRegistrationPromise promise = new PendingRegistrationPromise(channel);
-            regFuture.addListener(new ChannelFutureListener() {
-                @Override
-                public void operationComplete(ChannelFuture future) throws Exception {
-                    // Directly obtain the cause and do a null check so we only need one volatile read in case of a
-                    // failure.
-                    Throwable cause = future.cause();
-                    if (cause != null) {
-                        // Registration on the EventLoop failed so fail the ChannelPromise directly to not cause an
-                        // IllegalStateException once we try to access the EventLoop of the Channel.
-                        promise.setFailure(cause);
-                    } else {
-                        // Registration was successful, so set the correct executor to use.
-                        // See https://github.com/netty/netty/issues/2586
-                        promise.registered();
-                        doResolveAndConnect0(channel, remoteAddress, localAddress, promise);
-                    }
+            regFuture.addListener(future -> {
+                // Directly obtain the cause and do a null check so we only need one volatile read in case of a
+                // failure.
+                Throwable cause = future.cause();
+                if (cause != null) {
+                    // Registration on the EventLoop failed so fail the ChannelPromise directly to not cause an
+                    // IllegalStateException once we try to access the EventLoop of the Channel.
+                    promise.setFailure(cause);
+                } else {
+                    // Registration was successful, so set the correct executor to use.
+                    // See https://github.com/netty/netty/issues/2586
+                    promise.registered();
+                    doResolveAndConnect0(channel, remoteAddress, localAddress, promise);
                 }
             });
             return promise;
@@ -188,10 +194,15 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
     private ChannelFuture doResolveAndConnect0(final Channel channel, SocketAddress remoteAddress,
                                                final SocketAddress localAddress, final ChannelPromise promise) {
         try {
+            if (disableResolver) {
+                doConnect(remoteAddress, localAddress, promise);
+                return promise;
+            }
+
             final EventLoop eventLoop = channel.eventLoop();
             AddressResolver<SocketAddress> resolver;
             try {
-                resolver = this.resolver.getResolver(eventLoop);
+                resolver = ExternalAddressResolver.getOrDefault(externalResolver).getResolver(eventLoop);
             } catch (Throwable cause) {
                 channel.close();
                 return promise.setFailure(cause);
@@ -220,15 +231,12 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
             }
 
             // Wait until the name resolution is finished.
-            resolveFuture.addListener(new FutureListener<SocketAddress>() {
-                @Override
-                public void operationComplete(Future<SocketAddress> future) throws Exception {
-                    if (future.cause() != null) {
-                        channel.close();
-                        promise.setFailure(future.cause());
-                    } else {
-                        doConnect(future.getNow(), localAddress, promise);
-                    }
+            resolveFuture.addListener((FutureListener<SocketAddress>) future -> {
+                if (future.cause() != null) {
+                    channel.close();
+                    promise.setFailure(future.cause());
+                } else {
+                    doConnect(future.getNow(), localAddress, promise);
                 }
             });
         } catch (Throwable cause) {
@@ -257,12 +265,23 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
     }
 
     @Override
-    void init(Channel channel) {
+    void init(Channel channel) throws Throwable {
         ChannelPipeline p = channel.pipeline();
         p.addLast(config.handler());
 
         setChannelOptions(channel, newOptionsArray(), logger);
+
         setAttributes(channel, newAttributesArray());
+        Collection<ChannelInitializerExtension> extensions = getInitializerExtensions();
+        if (!extensions.isEmpty()) {
+            for (ChannelInitializerExtension extension : extensions) {
+                try {
+                    extension.postInitializeClientChannel(channel);
+                } catch (Exception e) {
+                    logger.warn("Exception thrown from postInitializeClientChannel", e);
+                }
+            }
+        }
     }
 
     @Override
@@ -301,6 +320,29 @@ public class Bootstrap extends AbstractBootstrap<Bootstrap, Channel> {
     }
 
     final AddressResolverGroup<?> resolver() {
-        return resolver;
+        if (disableResolver) {
+            return null;
+        }
+        return ExternalAddressResolver.getOrDefault(externalResolver);
+    }
+
+    /* Holder to avoid NoClassDefFoundError in case netty-resolver dependency is excluded
+       (e.g. some address families do not need name resolution) */
+    static final class ExternalAddressResolver {
+        final AddressResolverGroup<SocketAddress> resolverGroup;
+
+        @SuppressWarnings("unchecked")
+        ExternalAddressResolver(AddressResolverGroup<?> resolverGroup) {
+            this.resolverGroup = (AddressResolverGroup<SocketAddress>) resolverGroup;
+        }
+
+        @SuppressWarnings("unchecked")
+        static AddressResolverGroup<SocketAddress> getOrDefault(ExternalAddressResolver externalResolver) {
+            if (externalResolver == null) {
+                AddressResolverGroup<?> defaultResolverGroup = DefaultAddressResolverGroup.INSTANCE;
+                return (AddressResolverGroup<SocketAddress>) defaultResolverGroup;
+            }
+            return externalResolver.resolverGroup;
+        }
     }
 }

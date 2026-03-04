@@ -20,7 +20,7 @@
   <parent>
     <groupId>io.netty</groupId>
     <artifactId>netty-parent</artifactId>
-    <version>4.1.86.Final-SNAPSHOT</version>
+    <version>4.2.11.Final-SNAPSHOT</version>
   </parent>
 
   <artifactId>netty-all</artifactId>
@@ -32,7 +32,6 @@
     <javaModuleName>io.netty.all</javaModuleName>
     <generatedSourceDir>${project.build.directory}/src</generatedSourceDir>
     <dependencyVersionsDir>${project.build.directory}/versions</dependencyVersionsDir>
-    <japicmp.skip>true</japicmp.skip>
   </properties>
 
   <dependencyManagement>
@@ -48,20 +47,6 @@
   </dependencyManagement>
 
   <profiles>
-    <!--
-      This profile should be used during the release process together with the "native-dependencies" profile.
-      There is no need to do this by hand tho, use the ./scripts/finish_release.sh script.
-     -->
-    <profile>
-      <id>staging</id>
-      <repositories>
-        <repository>
-          <id>staged-releases</id>
-          <name>Staged Releases</name>
-          <url>https://oss.sonatype.org/service/local/repositories/${stagingRepositoryId}/content/</url>
-        </repository>
-      </repositories>
-    </profile>
     <profile>
       <id>native-dependencies</id>
       <dependencies>
@@ -82,6 +67,30 @@
         </dependency>
         <dependency>
           <groupId>${project.groupId}</groupId>
+          <artifactId>netty-transport-native-epoll</artifactId>
+          <classifier>linux-riscv64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-transport-native-io_uring</artifactId>
+          <classifier>linux-x86_64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-transport-native-io_uring</artifactId>
+          <classifier>linux-aarch_64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-transport-native-io_uring</artifactId>
+          <classifier>linux-riscv64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>${project.groupId}</groupId>
           <artifactId>netty-transport-native-kqueue</artifactId>
           <classifier>osx-x86_64</classifier>
           <scope>runtime</scope>
@@ -102,14 +111,97 @@
           <groupId>${project.groupId}</groupId>
           <artifactId>netty-resolver-dns-native-macos</artifactId>
           <classifier>osx-aarch_64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-codec-native-quic</artifactId>
+          <classifier>linux-x86_64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-codec-native-quic</artifactId>
+          <classifier>linux-aarch_64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-codec-native-quic</artifactId>
+          <classifier>osx-x86_64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-codec-native-quic</artifactId>
+          <classifier>osx-aarch_64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-codec-native-quic</artifactId>
+          <classifier>windows-x86_64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+      </dependencies>
+    </profile>
+    <profile>
+      <id>linux-native-dependencies</id>
+      <dependencies>
+        <!-- Depend on all our native jars for linux only -->
+        <!-- As this is executed on either macOS or Linux we directly need to specify the classifier -->
+        <!-- These dependencies will also be "merged" into the dependency section by the flatten plugin -->
+        <dependency>
+          <groupId>${project.groupId}</groupId>
+          <artifactId>netty-transport-native-epoll</artifactId>
+          <classifier>linux-x86_64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>${project.groupId}</groupId>
+          <artifactId>netty-transport-native-epoll</artifactId>
+          <classifier>linux-aarch_64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>${project.groupId}</groupId>
+          <artifactId>netty-transport-native-epoll</artifactId>
+          <classifier>linux-riscv64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-transport-native-io_uring</artifactId>
+          <classifier>linux-x86_64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-transport-native-io_uring</artifactId>
+          <classifier>linux-aarch_64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-transport-native-io_uring</artifactId>
+          <classifier>linux-riscv64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-codec-native-quic</artifactId>
+          <classifier>linux-x86_64</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-codec-native-quic</artifactId>
+          <classifier>linux-aarch_64</classifier>
           <scope>runtime</scope>
         </dependency>
       </dependencies>
     </profile>
 
-    <!-- The linux profile will only include the native jar for epoll to the all jar.
-         If you want to also include the native jar for kqueue use -Puber.
-    -->
     <profile>
       <!-- Don't active this profile based on the OS we run on so the flatten plugin will not include it -->
       <id>linux</id>
@@ -118,15 +210,24 @@
         <dependency>
           <groupId>${project.groupId}</groupId>
           <artifactId>netty-transport-native-epoll</artifactId>
-          <version>${project.version}</version>
+          <classifier>${jni.classifier}</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-transport-native-io_uring</artifactId>
+          <classifier>${jni.classifier}</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-codec-native-quic</artifactId>
           <classifier>${jni.classifier}</classifier>
           <scope>runtime</scope>
         </dependency>
       </dependencies>
     </profile>
-    <!-- The mac, openbsd and freebsd  profile will only include the native jar for epol to the all jar.
-         If you want to also include the native jar for kqueue use -Puber.
-    -->
+
     <profile>
       <!-- Don't active this profile based on the OS we run on so the flatten plugin will not include it -->
       <id>mac</id>
@@ -135,14 +236,18 @@
         <dependency>
           <groupId>${project.groupId}</groupId>
           <artifactId>netty-transport-native-kqueue</artifactId>
-          <version>${project.version}</version>
           <classifier>${jni.classifier}</classifier>
           <scope>runtime</scope>
         </dependency>
         <dependency>
           <groupId>${project.groupId}</groupId>
           <artifactId>netty-resolver-dns-native-macos</artifactId>
-          <version>${project.version}</version>
+          <classifier>${jni.classifier}</classifier>
+          <scope>runtime</scope>
+        </dependency>
+        <dependency>
+          <groupId>io.netty</groupId>
+          <artifactId>netty-codec-native-quic</artifactId>
           <classifier>${jni.classifier}</classifier>
           <scope>runtime</scope>
         </dependency>
@@ -155,7 +260,6 @@
       <plugin>
         <groupId>org.codehaus.mojo</groupId>
         <artifactId>flatten-maven-plugin</artifactId>
-        <version>1.2.2</version>
         <configuration>
           <!-- We need to also merge the dependencies defined by our profile. -->
           <embedBuildProfileDependencies>true</embedBuildProfileDependencies>
@@ -185,7 +289,6 @@
       <plugin>
         <groupId>org.basepom.maven</groupId>
         <artifactId>duplicate-finder-maven-plugin</artifactId>
-        <version>1.3.0</version>
         <executions>
           <execution>
             <id>default</id>
@@ -202,6 +305,9 @@
           <checkCompileClasspath>true</checkCompileClasspath>
           <checkRuntimeClasspath>true</checkRuntimeClasspath>
           <checkTestClasspath>false</checkTestClasspath>
+          <ignoredClassPatterns>
+            <ignoredClassPattern>^META-INF.versions.*$</ignoredClassPattern>
+          </ignoredClassPatterns>
           <preferLocal>true</preferLocal>
           <useResultFile>true</useResultFile>
           <resultFile>${project.build.directory}/duplicate-finder-result.xml</resultFile>
@@ -215,6 +321,11 @@
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>netty-buffer</artifactId>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>netty-codec-base</artifactId>
       <scope>compile</scope>
     </dependency>
     <dependency>
@@ -234,12 +345,22 @@
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
+      <artifactId>netty-codec-compression</artifactId>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
       <artifactId>netty-codec-http</artifactId>
       <scope>compile</scope>
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>netty-codec-http2</artifactId>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>netty-codec-http3</artifactId>
       <scope>compile</scope>
     </dependency>
     <dependency>
@@ -285,6 +406,32 @@
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
+      <artifactId>netty-codec-protobuf</artifactId>
+      <scope>compile</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>com.google.protobuf</groupId>
+          <artifactId>protobuf-java</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>com.google.protobuf.nano</groupId>
+          <artifactId>protobuf-javanano</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>netty-codec-marshalling</artifactId>
+      <scope>compile</scope>
+      <exclusions>
+        <exclusion>
+          <groupId>org.jboss.marshalling</groupId>
+          <artifactId>jboss-marshalling</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
       <artifactId>netty-common</artifactId>
       <scope>compile</scope>
     </dependency>
@@ -296,6 +443,11 @@
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>netty-handler-proxy</artifactId>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-handler-ssl-ocsp</artifactId>
       <scope>compile</scope>
     </dependency>
     <dependency>
@@ -356,6 +508,16 @@
     <dependency>
       <groupId>${project.groupId}</groupId>
       <artifactId>netty-resolver-dns-classes-macos</artifactId>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-transport-classes-io_uring</artifactId>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-codec-classes-quic</artifactId>
       <scope>compile</scope>
     </dependency>
   </dependencies>

@@ -20,7 +20,6 @@ import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import org.jetbrains.annotations.Async.Execute;
-import org.jetbrains.annotations.Async.Schedule;
 
 import java.util.Collection;
 import java.util.Collections;
@@ -62,11 +61,6 @@ public abstract class AbstractEventExecutor extends AbstractExecutorService impl
     }
 
     @Override
-    public boolean inEventLoop() {
-        return inEventLoop(Thread.currentThread());
-    }
-
-    @Override
     public Iterator<EventExecutor> iterator() {
         return selfCollection.iterator();
     }
@@ -91,26 +85,6 @@ public abstract class AbstractEventExecutor extends AbstractExecutorService impl
     public List<Runnable> shutdownNow() {
         shutdown();
         return Collections.emptyList();
-    }
-
-    @Override
-    public <V> Promise<V> newPromise() {
-        return new DefaultPromise<V>(this);
-    }
-
-    @Override
-    public <V> ProgressivePromise<V> newProgressivePromise() {
-        return new DefaultProgressivePromise<V>(this);
-    }
-
-    @Override
-    public <V> Future<V> newSucceededFuture(V result) {
-        return new SucceededFuture<V>(this, result);
-    }
-
-    @Override
-    public <V> Future<V> newFailedFuture(Throwable cause) {
-        return new FailedFuture<V>(this, cause);
     }
 
     @Override
@@ -177,25 +151,19 @@ public abstract class AbstractEventExecutor extends AbstractExecutorService impl
     /**
      * Like {@link #execute(Runnable)} but does not guarantee the task will be run until either
      * a non-lazy task is executed or the executor is shut down.
-     *
-     * This is equivalent to submitting a {@link AbstractEventExecutor.LazyRunnable} to
-     * {@link #execute(Runnable)} but for an arbitrary {@link Runnable}.
-     *
+     * <p>
      * The default implementation just delegates to {@link #execute(Runnable)}.
+     * </p>
      */
     @UnstableApi
     public void lazyExecute(Runnable task) {
-        lazyExecute0(task);
-    }
-
-    private void lazyExecute0(@Schedule Runnable task) {
         execute(task);
     }
 
     /**
-     * Marker interface for {@link Runnable} to indicate that it should be queued for execution
-     * but does not need to run immediately.
+     *  @deprecated override {@link SingleThreadEventExecutor#wakesUpForTask} to re-create this behaviour
+     *
      */
-    @UnstableApi
+    @Deprecated
     public interface LazyRunnable extends Runnable { }
 }

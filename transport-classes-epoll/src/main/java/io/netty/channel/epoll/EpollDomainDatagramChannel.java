@@ -21,6 +21,7 @@ import io.netty.channel.AddressedEnvelope;
 import io.netty.channel.ChannelMetadata;
 import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPipeline;
+import io.netty.channel.ChannelPromise;
 import io.netty.channel.DefaultAddressedEnvelope;
 import io.netty.channel.unix.DomainDatagramChannel;
 import io.netty.channel.unix.DomainDatagramChannelConfig;
@@ -33,7 +34,6 @@ import io.netty.channel.unix.UnixChannelUtil;
 import io.netty.util.CharsetUtil;
 import io.netty.util.UncheckedBooleanSupplier;
 import io.netty.util.internal.StringUtil;
-import io.netty.util.internal.UnstableApi;
 
 import java.io.IOException;
 import java.net.SocketAddress;
@@ -41,10 +41,9 @@ import java.nio.ByteBuffer;
 
 import static io.netty.channel.epoll.LinuxSocket.newSocketDomainDgram;
 
-@UnstableApi
 public final class EpollDomainDatagramChannel extends AbstractEpollChannel implements DomainDatagramChannel {
 
-    private static final ChannelMetadata METADATA = new ChannelMetadata(true);
+    private static final ChannelMetadata METADATA = new ChannelMetadata(true, 16);
 
     private static final String EXPECTED_TYPES =
             " (expected: " +
@@ -69,7 +68,7 @@ public final class EpollDomainDatagramChannel extends AbstractEpollChannel imple
     }
 
     private EpollDomainDatagramChannel(LinuxSocket socket, boolean active) {
-        super(null, socket, active);
+        super(null, socket, active, EpollIoOps.valueOf(0));
         config = new EpollDomainDatagramChannelConfig(this);
     }
 
@@ -183,7 +182,7 @@ public final class EpollDomainDatagramChannel extends AbstractEpollChannel imple
                         remoteAddress.path().getBytes(CharsetUtil.UTF_8));
             }
         } else if (data.nioBufferCount() > 1) {
-            IovArray array = ((EpollEventLoop) eventLoop()).cleanIovArray();
+            IovArray array =  ((NativeArrays) registration().attachment()).cleanIovArray();
             array.add(data, data.readerIndex(), data.readableBytes());
             int cnt = array.count();
             assert cnt != 0;
@@ -229,7 +228,7 @@ public final class EpollDomainDatagramChannel extends AbstractEpollChannel imple
 
                 ByteBuf content = (ByteBuf) e.content();
                 return UnixChannelUtil.isBufferCopyNeededForWrite(content) ?
-                        new DefaultAddressedEnvelope<ByteBuf, DomainSocketAddress>(
+                        new DefaultAddressedEnvelope<>(
                                 newDirectBuffer(e, content), (DomainSocketAddress) e.recipient()) : e;
             }
         }
@@ -268,6 +267,18 @@ public final class EpollDomainDatagramChannel extends AbstractEpollChannel imple
         return new EpollDomainDatagramChannelUnsafe();
     }
 
+    @Override
+    protected void doRegister(ChannelPromise promise) {
+        super.doRegister(promise);
+        promise.addListener(f -> {
+            if (f.isSuccess() && isRegistered()) {
+                // As Datagram is connection-less we can submit the current ops once the registration itself was
+                // successful.
+                submitCurrentOps();
+            }
+        });
+    }
+
     /**
      * Returns the unix credentials (uid, gid, pid) of the peer
      * <a href=https://man7.org/linux/man-pages/man7/socket.7.html>SO_PEERCRED</a>
@@ -297,12 +308,9 @@ public final class EpollDomainDatagramChannel extends AbstractEpollChannel imple
                 return;
             }
             final EpollRecvByteAllocatorHandle allocHandle = recvBufAllocHandle();
-            allocHandle.edgeTriggered(isFlagSet(Native.EPOLLET));
-
             final ChannelPipeline pipeline = pipeline();
             final ByteBufAllocator allocator = config.getAllocator();
             allocHandle.reset(config);
-            epollInBefore();
 
             Throwable exception = null;
             try {
@@ -375,7 +383,9 @@ public final class EpollDomainDatagramChannel extends AbstractEpollChannel imple
                     pipeline.fireExceptionCaught(exception);
                 }
             } finally {
-                epollInFinally(config);
+                if (shouldStopReading(config)) {
+                    clearEpollIn();
+                }
             }
         }
     }

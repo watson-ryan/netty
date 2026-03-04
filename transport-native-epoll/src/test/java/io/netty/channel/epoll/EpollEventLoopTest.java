@@ -24,11 +24,11 @@ import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.unix.FileDescriptor;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.RejectedExecutionHandlers;
 import io.netty.util.concurrent.ThreadPerTaskExecutor;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
@@ -51,6 +51,12 @@ public class EpollEventLoopTest extends AbstractSingleThreadEventLoopTest {
     }
 
     @Override
+    protected EventLoopGroup newAutoScalingEventLoopGroup() {
+        return new EpollEventLoopGroup(SCALING_MAX_THREADS, (Executor) null, AUTO_SCALING_CHOOSER_FACTORY,
+                                       DefaultSelectStrategyFactory.INSTANCE);
+    }
+
+    @Override
     protected ServerSocketChannel newChannel() {
         return new EpollServerSocketChannel();
     }
@@ -65,15 +71,14 @@ public class EpollEventLoopTest extends AbstractSingleThreadEventLoopTest {
         final AtomicReference<Throwable> capture = new AtomicReference<Throwable>();
 
         final EventLoopGroup group = new EpollEventLoop(null,
-                new ThreadPerTaskExecutor(new DefaultThreadFactory(getClass())), 0,
-                DefaultSelectStrategyFactory.INSTANCE.newSelectStrategy(), RejectedExecutionHandlers.reject(),
-                null, null) {
+                new ThreadPerTaskExecutor(new DefaultThreadFactory(getClass())), eventLoop -> new EpollIoHandler(
+                        eventLoop, 0, DefaultSelectStrategyFactory.INSTANCE.newSelectStrategy()) {
             @Override
             void handleLoopException(Throwable t) {
                 capture.set(t);
                 super.handleLoopException(t);
             }
-        };
+        });
 
         try {
             final EventLoop eventLoop = group.next();

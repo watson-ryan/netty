@@ -39,26 +39,6 @@ public class ReferenceCountedOpenSslEngineTest extends OpenSslEngineTest {
         return SslProvider.OPENSSL_REFCNT;
     }
 
-    @Override
-    protected void cleanupClientSslContext(SslContext ctx) {
-        ReferenceCountUtil.release(ctx);
-    }
-
-    @Override
-    protected void cleanupClientSslEngine(SSLEngine engine) {
-        ReferenceCountUtil.release(unwrapEngine(engine));
-    }
-
-    @Override
-    protected void cleanupServerSslContext(SslContext ctx) {
-        ReferenceCountUtil.release(ctx);
-    }
-
-    @Override
-    protected void cleanupServerSslEngine(SSLEngine engine) {
-        ReferenceCountUtil.release(unwrapEngine(engine));
-    }
-
     @MethodSource("newTestParams")
     @ParameterizedTest
     public void testNotLeakOnException(SSLEngineTestParam param) throws Exception {
@@ -77,17 +57,9 @@ public class ReferenceCountedOpenSslEngineTest extends OpenSslEngineTest {
         });
     }
 
-    @SuppressWarnings("deprecation")
     @Override
     protected SslContext wrapContext(SSLEngineTestParam param, SslContext context) {
-        if (context instanceof ReferenceCountedOpenSslContext) {
-            if (param instanceof OpenSslEngineTestParam) {
-                ((ReferenceCountedOpenSslContext) context).setUseTasks(((OpenSslEngineTestParam) param).useTasks);
-            }
-            // Explicit enable the session cache as its disabled by default on the client side.
-            ((ReferenceCountedOpenSslContext) context).sessionContext().setSessionCacheEnabled(true);
-        }
-        return context;
+        return OpenSslEngineTestParam.wrapContext(param, context);
     }
 
     @MethodSource("newTestParams")

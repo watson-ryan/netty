@@ -30,6 +30,9 @@ import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.ConnectTimeoutException;
 import io.netty.channel.EventLoop;
+import io.netty.channel.IoEvent;
+import io.netty.channel.IoEventLoop;
+import io.netty.channel.IoRegistration;
 import io.netty.channel.RecvByteBufAllocator;
 import io.netty.channel.socket.ChannelInputShutdownEvent;
 import io.netty.channel.socket.ChannelInputShutdownReadComplete;
@@ -56,6 +59,7 @@ import static io.netty.channel.unix.UnixChannelUtil.computeRemoteAddr;
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
 
 abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChannel {
+
     private static final ChannelMetadata METADATA = new ChannelMetadata(false);
     /**
      * The future of the current connection attempt.  If not null, subsequent
@@ -66,8 +70,10 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
     private SocketAddress requestedRemoteAddress;
 
     final BsdSocket socket;
+    private IoRegistration registration;
     private boolean readFilterEnabled;
     private boolean writeFilterEnabled;
+
     boolean readReadyRunnablePending;
     boolean inputClosedSeenErrorOnRead;
     protected volatile boolean active;
@@ -96,12 +102,22 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
         local = fd.localAddress();
     }
 
+    @Override
+    protected boolean isCompatible(EventLoop loop) {
+        return loop instanceof IoEventLoop && ((IoEventLoop) loop).isCompatible(AbstractKQueueUnsafe.class);
+    }
+
     static boolean isSoErrorZero(BsdSocket fd) {
         try {
             return fd.getSoError() == 0;
         } catch (IOException e) {
             throw new ChannelException(e);
         }
+    }
+
+    protected final IoRegistration registration() {
+        assert registration != null;
+        return registration;
     }
 
     @Override
@@ -139,34 +155,35 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
     }
 
     @Override
-    protected boolean isCompatible(EventLoop loop) {
-        return loop instanceof KQueueEventLoop;
-    }
-
-    @Override
     public boolean isOpen() {
         return socket.isOpen();
     }
 
     @Override
     protected void doDeregister() throws Exception {
-        ((KQueueEventLoop) eventLoop()).remove(this);
-
         // As unregisteredFilters() may have not been called because isOpen() returned false we just set both filters
         // to false to ensure a consistent state in all cases.
-        readFilterEnabled = false;
-        writeFilterEnabled = false;
-    }
-
-    void unregisterFilters() throws Exception {
         // Make sure we unregister our filters from kqueue!
         readFilter(false);
         writeFilter(false);
         clearRdHup0();
+
+        IoRegistration registration = this.registration;
+        if (registration != null) {
+            registration.cancel();
+        }
     }
 
     private void clearRdHup0() {
-        evSet0(Native.EVFILT_SOCK, Native.EV_DELETE_DISABLE, Native.NOTE_RDHUP);
+        submit(KQueueIoOps.newOps(Native.EVFILT_SOCK, Native.EV_DELETE_DISABLE, Native.NOTE_RDHUP));
+    }
+
+    private void submit(KQueueIoOps ops) {
+        try {
+            registration.submit(ops);
+        } catch (Exception e) {
+            throw new ChannelException(e);
+        }
     }
 
     @Override
@@ -179,31 +196,32 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
         // executeReadReadyRunnable could read nothing, and if the user doesn't explicitly call read they will
         // never get data after this.
         readFilter(true);
-
-        // If auto read was toggled off on the last read loop then we may not be notified
-        // again if we didn't consume all the data. So we force a read operation here if there maybe more data.
-        if (unsafe.maybeMoreDataToRead) {
-            unsafe.executeReadReadyRunnable(config());
-        }
     }
 
     @Override
-    protected void doRegister() throws Exception {
-        // Just in case the previous EventLoop was shutdown abruptly, or an event is still pending on the old EventLoop
-        // make sure the readReadyRunnablePending variable is reset so we will be able to execute the Runnable on the
-        // new EventLoop.
-        readReadyRunnablePending = false;
+    protected void doRegister(ChannelPromise promise) {
+        ((IoEventLoop) eventLoop()).register((AbstractKQueueUnsafe) unsafe()).addListener(f -> {
+            if (f.isSuccess()) {
+                this.registration = (IoRegistration) f.getNow();
+                // Just in case the previous EventLoop was shutdown abruptly, or an event is still pending on the old
+                // EventLoop make sure the readReadyRunnablePending variable is reset so we will be able to execute
+                // the Runnable on the new EventLoop.
+                readReadyRunnablePending = false;
 
-        ((KQueueEventLoop) eventLoop()).add(this);
+                submit(KQueueIoOps.newOps(Native.EVFILT_SOCK, Native.EV_ADD, Native.NOTE_RDHUP));
 
-        // Add the write event first so we get notified of connection refused on the client side!
-        if (writeFilterEnabled) {
-            evSet0(Native.EVFILT_WRITE, Native.EV_ADD_CLEAR_ENABLE);
-        }
-        if (readFilterEnabled) {
-            evSet0(Native.EVFILT_READ, Native.EV_ADD_CLEAR_ENABLE);
-        }
-        evSet0(Native.EVFILT_SOCK, Native.EV_ADD, Native.NOTE_RDHUP);
+                // Add the write event first so we get notified of connection refused on the client side!
+                if (writeFilterEnabled) {
+                    submit(Native.WRITE_ENABLED_OPS);
+                }
+                if (readFilterEnabled) {
+                    submit(Native.READ_ENABLED_OPS);
+                }
+                promise.setSuccess();
+            } else {
+                promise.setFailure(f.cause());
+            }
+        });
     }
 
     @Override
@@ -340,80 +358,75 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
     void readFilter(boolean readFilterEnabled) throws IOException {
         if (this.readFilterEnabled != readFilterEnabled) {
             this.readFilterEnabled = readFilterEnabled;
-            evSet(Native.EVFILT_READ, readFilterEnabled ? Native.EV_ADD_CLEAR_ENABLE : Native.EV_DELETE_DISABLE);
+            submit(readFilterEnabled ? Native.READ_ENABLED_OPS : Native.READ_DISABLED_OPS);
         }
     }
 
     void writeFilter(boolean writeFilterEnabled) throws IOException {
         if (this.writeFilterEnabled != writeFilterEnabled) {
             this.writeFilterEnabled = writeFilterEnabled;
-            evSet(Native.EVFILT_WRITE, writeFilterEnabled ? Native.EV_ADD_CLEAR_ENABLE : Native.EV_DELETE_DISABLE);
-        }
-    }
-
-    private void evSet(short filter, short flags) {
-        if (isRegistered()) {
-            evSet0(filter, flags);
-        }
-    }
-
-    private void evSet0(short filter, short flags) {
-        evSet0(filter, flags, 0);
-    }
-
-    private void evSet0(short filter, short flags, int fflags) {
-        // Only try to add to changeList if the FD is still open, if not we already closed it in the meantime.
-        if (isOpen()) {
-            ((KQueueEventLoop) eventLoop()).evSet(this, filter, flags, fflags);
+            submit(writeFilterEnabled ? Native.WRITE_ENABLED_OPS : Native.WRITE_DISABLED_OPS);
         }
     }
 
     @UnstableApi
-    public abstract class AbstractKQueueUnsafe extends AbstractUnsafe {
+    public abstract class AbstractKQueueUnsafe extends AbstractUnsafe implements KQueueIoHandle {
         boolean readPending;
-        boolean maybeMoreDataToRead;
         private KQueueRecvByteAllocatorHandle allocHandle;
-        private final Runnable readReadyRunnable = new Runnable() {
-            @Override
-            public void run() {
-                readReadyRunnablePending = false;
-                readReady(recvBufAllocHandle());
-            }
-        };
 
-        final void readReady(long numberBytesPending) {
-            KQueueRecvByteAllocatorHandle allocHandle = recvBufAllocHandle();
-            allocHandle.numberBytesPending(numberBytesPending);
-            readReady(allocHandle);
+        Channel channel() {
+            return AbstractKQueueChannel.this;
+        }
+
+        @Override
+        public int ident() {
+            return fd().intValue();
+        }
+
+        @Override
+        public void close() {
+            close(voidPromise());
+        }
+
+        @Override
+        public void handle(IoRegistration registration, IoEvent event) {
+            KQueueIoEvent kqueueEvent = (KQueueIoEvent) event;
+            final short filter = kqueueEvent.filter();
+            final short flags = kqueueEvent.flags();
+            final int fflags = kqueueEvent.fflags();
+            final long data = kqueueEvent.data();
+
+            // First check for EPOLLOUT as we may need to fail the connect ChannelPromise before try
+            // to read from the file descriptor.
+            if (filter == Native.EVFILT_WRITE) {
+                writeReady();
+            } else if (filter == Native.EVFILT_READ) {
+                // Check READ before EOF to ensure all data is read before shutting down the input.
+                KQueueRecvByteAllocatorHandle allocHandle = recvBufAllocHandle();
+                readReady(allocHandle);
+            } else if (filter == Native.EVFILT_SOCK && (fflags & Native.NOTE_RDHUP) != 0) {
+                readEOF();
+                return;
+            }
+
+            // Check if EV_EOF was set, this will notify us for connection-reset in which case
+            // we may close the channel directly or try to read more data depending on the state of the
+            // Channel and also depending on the AbstractKQueueChannel subtype.
+            if ((flags & Native.EV_EOF) != 0) {
+                readEOF();
+            }
         }
 
         abstract void readReady(KQueueRecvByteAllocatorHandle allocHandle);
 
-        final void readReadyBefore() {
-            maybeMoreDataToRead = false;
-        }
-
-        final void readReadyFinally(ChannelConfig config) {
-            maybeMoreDataToRead = allocHandle.maybeMoreDataToRead();
-
-            if (allocHandle.isReadEOF() || readPending && maybeMoreDataToRead) {
-                // trigger a read again as there may be something left to read and because of ET we
-                // will not get notified again until we read everything from the socket
-                //
-                // It is possible the last fireChannelRead call could cause the user to call read() again, or if
-                // autoRead is true the call to channelReadComplete would also call read, but maybeMoreDataToRead is set
-                // to false before every read operation to prevent re-entry into readReady() we will not read from
-                // the underlying OS again unless the user happens to call read again.
-                executeReadReadyRunnable(config);
-            } else if (!readPending && !config.isAutoRead()) {
-                // Check if there is a readPending which was not processed yet.
-                // This could be for two reasons:
-                // * The user called Channel.read() or ChannelHandlerContext.read() in channelRead(...) method
-                // * The user called Channel.read() or ChannelHandlerContext.read() in channelReadComplete(...) method
-                //
-                // See https://github.com/netty/netty/issues/2254
-                clearReadFilter0();
-            }
+        final boolean shouldStopReading(ChannelConfig config) {
+            // Check if there is a readPending which was not processed yet.
+            // This could be for two reasons:
+            // * The user called Channel.read() or ChannelHandlerContext.read() in channelRead(...) method
+            // * The user called Channel.read() or ChannelHandlerContext.read() in channelReadComplete(...) method
+            //
+            // See https://github.com/netty/netty/issues/2254
+            return !readPending && !config.isAutoRead();
         }
 
         final boolean failConnectPromise(Throwable cause) {
@@ -432,7 +445,7 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
             return false;
         }
 
-        final void writeReady() {
+        private void writeReady() {
             if (connectPromise != null) {
                 // pending connect which is now complete so handle it.
                 finishConnect();
@@ -447,7 +460,7 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
          */
         void shutdownInput(boolean readEOF) {
             // We need to take special care of calling finishConnect() if readEOF is true and we not
-            // fullfilled the connectPromise yet. If we fail to do so the connectPromise will be failed
+            // fulfilled the connectPromise yet. If we fail to do so the connectPromise will be failed
             // with a ClosedChannelException as a close() will happen and so the FD is closed before we
             // have a chance to call finishConnect() later on. Calling finishConnect() here will ensure
             // we observe the correct exception in case of a connect failure.
@@ -467,18 +480,22 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
                         // We attempted to shutdown and failed, which means the input has already effectively been
                         // shutdown.
                     }
-                    clearReadFilter0();
+                    if (shouldStopReading(config())) {
+                        clearReadFilter0();
+                    }
                     pipeline().fireUserEventTriggered(ChannelInputShutdownEvent.INSTANCE);
                 } else {
                     close(voidPromise());
+                    return;
                 }
-            } else if (!readEOF && !inputClosedSeenErrorOnRead) {
+            }
+            if (!readEOF && !inputClosedSeenErrorOnRead) {
                 inputClosedSeenErrorOnRead = true;
                 pipeline().fireUserEventTriggered(ChannelInputShutdownReadComplete.INSTANCE);
             }
         }
 
-        final void readEOF() {
+        private void readEOF() {
             // This must happen before we attempt to read. This will ensure reading continues until an error occurs.
             final KQueueRecvByteAllocatorHandle allocHandle = recvBufAllocHandle();
             allocHandle.readEOF();
@@ -516,14 +533,6 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
             }
         }
 
-        final void executeReadReadyRunnable(ChannelConfig config) {
-            if (readReadyRunnablePending || !isActive() || shouldBreakReadReady(config)) {
-                return;
-            }
-            readReadyRunnablePending = true;
-            eventLoop().execute(readReadyRunnable);
-        }
-
         protected final void clearReadFilter0() {
             assert eventLoop().inEventLoop();
             try {
@@ -545,7 +554,9 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
         @Override
         public void connect(
                 final SocketAddress remoteAddress, final SocketAddress localAddress, final ChannelPromise promise) {
-            if (!promise.setUncancellable() || !ensureOpen(promise)) {
+            // Don't mark the connect promise as uncancellable as in fact we can cancel it as it is using
+            // non-blocking io.
+            if (promise.isDone() || !ensureOpen(promise)) {
                 return;
             }
 
@@ -562,7 +573,7 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
                     requestedRemoteAddress = remoteAddress;
 
                     // Schedule connect timeout.
-                    int connectTimeoutMillis = config().getConnectTimeoutMillis();
+                    final int connectTimeoutMillis = config().getConnectTimeoutMillis();
                     if (connectTimeoutMillis > 0) {
                         connectTimeoutFuture = eventLoop().schedule(new Runnable() {
                             @Override
@@ -570,7 +581,8 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
                                 ChannelPromise connectPromise = AbstractKQueueChannel.this.connectPromise;
                                 if (connectPromise != null && !connectPromise.isDone()
                                         && connectPromise.tryFailure(new ConnectTimeoutException(
-                                        "connection timed out: " + remoteAddress))) {
+                                                "connection timed out after " + connectTimeoutMillis + " ms: " +
+                                                        remoteAddress))) {
                                     close(voidPromise());
                                 }
                             }
@@ -579,7 +591,9 @@ abstract class AbstractKQueueChannel extends AbstractChannel implements UnixChan
 
                     promise.addListener(new ChannelFutureListener() {
                         @Override
-                        public void operationComplete(ChannelFuture future) throws Exception {
+                        public void operationComplete(ChannelFuture future) {
+                            // If the connect future is cancelled we also cancel the timeout and close the
+                            // underlying socket.
                             if (future.isCancelled()) {
                                 if (connectTimeoutFuture != null) {
                                     connectTimeoutFuture.cancel(false);

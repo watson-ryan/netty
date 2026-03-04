@@ -17,6 +17,7 @@ package io.netty.handler.codec.http;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufHolder;
+import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.DecoderResult;
@@ -67,6 +68,10 @@ public abstract class HttpContentEncoder extends MessageToMessageCodec<HttpReque
     private final Queue<CharSequence> acceptEncodingQueue = new ArrayDeque<CharSequence>();
     private EmbeddedChannel encoder;
     private State state = State.AWAIT_HEADERS;
+
+    public HttpContentEncoder() {
+        super(HttpRequest.class, HttpObject.class);
+    }
 
     @Override
     public boolean acceptOutboundMessage(Object msg) throws Exception {
@@ -140,10 +145,8 @@ public abstract class HttpContentEncoder extends MessageToMessageCodec<HttpReque
                  * See https://github.com/netty/netty/issues/5382
                  */
                 if (isPassthru(res.protocolVersion(), code, acceptEncoding)) {
-                    if (isFull) {
-                        out.add(ReferenceCountUtil.retain(res));
-                    } else {
-                        out.add(ReferenceCountUtil.retain(res));
+                    out.add(ReferenceCountUtil.retain(res));
+                    if (!isFull) {
                         // Pass through all following contents.
                         state = State.PASS_THROUGH;
                     }
@@ -163,10 +166,8 @@ public abstract class HttpContentEncoder extends MessageToMessageCodec<HttpReque
 
                 // If unable to encode, pass through.
                 if (result == null) {
-                    if (isFull) {
-                        out.add(ReferenceCountUtil.retain(res));
-                    } else {
-                        out.add(ReferenceCountUtil.retain(res));
+                    out.add(ReferenceCountUtil.retain(res));
+                    if (!isFull) {
                         // Pass through all following contents.
                         state = State.PASS_THROUGH;
                     }
@@ -208,6 +209,9 @@ public abstract class HttpContentEncoder extends MessageToMessageCodec<HttpReque
                 ensureContent(msg);
                 if (encodeContent((HttpContent) msg, out)) {
                     state = State.AWAIT_HEADERS;
+                } else if (out.isEmpty()) {
+                    // MessageToMessageCodec needs at least one output message
+                    out.add(new DefaultHttpContent(Unpooled.EMPTY_BUFFER));
                 }
                 break;
             }

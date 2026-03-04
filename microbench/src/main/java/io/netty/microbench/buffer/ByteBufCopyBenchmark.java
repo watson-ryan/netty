@@ -16,7 +16,7 @@
 package io.netty.microbench.buffer;
 
 import io.netty.buffer.ByteBuf;
-import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.Unpooled;
 import io.netty.microbench.util.AbstractMicrobenchmark;
 import org.openjdk.jmh.annotations.Benchmark;
@@ -32,21 +32,54 @@ public class ByteBufCopyBenchmark extends AbstractMicrobenchmark {
         System.setProperty("io.netty.buffer.bytebuf.checkAccessible", "false");
     }
 
-    @Param({"7", "36", "128", "512" })
+    @Param({
+            "7",
+            "36",
+            "128",
+            "512",
+    })
     private int size;
-    @Param({"true", "false" })
-    private boolean directByteBuff;
-    @Param({"true", "false" })
+
+    @Param({
+            "true",
+            "false",
+    })
+    private boolean directByteBuf;
+
+    @Param({
+            "true",
+            "false",
+    })
     private boolean directByteBuffer;
-    @Param({"false", "true" })
+
+    @Param({
+            "false",
+            "true"
+    })
     private boolean readonlyByteBuffer;
-    @Param({"true", "false" })
+
+    @Param({
+            "true",
+            "false",
+    })
     private boolean pooledByteBuf;
-    @Param({"true", "false" })
+
+    @Param({
+            "true",
+            "false",
+    })
     private boolean alignedCopyByteBuffer;
-    @Param({"true", "false" })
+
+    @Param({
+            "true",
+            "false",
+    })
     private boolean alignedCopyByteBuf;
-    @Param({"true", "false" })
+
+    @Param({
+            "true",
+            "false",
+    })
     private boolean nativeOrderByteBuffer;
 
     private ByteBuffer byteBuffer;
@@ -61,11 +94,11 @@ public class ByteBufCopyBenchmark extends AbstractMicrobenchmark {
                 ByteBuffer.allocateDirect(requiredByteBufferSize) :
                 ByteBuffer.allocate(requiredByteBufferSize);
         if (pooledByteBuf) {
-            buffer = directByteBuff ?
-                    PooledByteBufAllocator.DEFAULT.directBuffer(requiredByteBufSize, requiredByteBufSize) :
-                    PooledByteBufAllocator.DEFAULT.heapBuffer(requiredByteBufSize, requiredByteBufSize);
+            buffer = directByteBuf ?
+                    ByteBufAllocator.DEFAULT.directBuffer(requiredByteBufSize, requiredByteBufSize) :
+                    ByteBufAllocator.DEFAULT.heapBuffer(requiredByteBufSize, requiredByteBufSize);
         } else {
-            buffer = directByteBuff ?
+            buffer = directByteBuf ?
                     Unpooled.directBuffer(requiredByteBufSize, requiredByteBufSize) :
                     Unpooled.buffer(requiredByteBufSize, requiredByteBufSize);
         }

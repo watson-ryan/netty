@@ -19,12 +19,12 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.Channel;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.local.LocalAddress;
 import io.netty.channel.local.LocalChannel;
-import io.netty.channel.local.LocalEventLoopGroup;
+import io.netty.channel.local.LocalIoHandler;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.GenericFutureListener;
 import io.netty.util.concurrent.Promise;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -43,7 +43,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 public class AbstractChannelPoolMapTest {
     @Test
     public void testMap() throws Exception {
-        EventLoopGroup group = new LocalEventLoopGroup();
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(LocalIoHandler.newFactory());
         LocalAddress addr = new LocalAddress(getLocalAddrId());
         final Bootstrap cb = new Bootstrap();
         cb.remoteAddress(addr);
@@ -85,7 +85,7 @@ public class AbstractChannelPoolMapTest {
 
     @Test
     public void testRemoveClosesChannelPool() {
-        EventLoopGroup group = new LocalEventLoopGroup();
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(LocalIoHandler.newFactory());
         LocalAddress addr = new LocalAddress(getLocalAddrId());
         final Bootstrap cb = new Bootstrap();
         cb.remoteAddress(addr);
@@ -113,7 +113,7 @@ public class AbstractChannelPoolMapTest {
 
     @Test
     public void testCloseClosesPoolsImmediately() {
-        EventLoopGroup group = new LocalEventLoopGroup();
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(LocalIoHandler.newFactory());
         LocalAddress addr = new LocalAddress(getLocalAddrId());
         final Bootstrap cb = new Bootstrap();
         cb.remoteAddress(addr);
@@ -157,14 +157,11 @@ public class AbstractChannelPoolMapTest {
         @Override
         public Future<Void> closeAsync() {
             Future<Void> poolClose = super.closeAsync();
-            poolClose.addListener(new GenericFutureListener<Future<? super Void>>() {
-                @Override
-                public void operationComplete(Future<? super Void> future) throws Exception {
-                    if (future.isSuccess()) {
-                        closeFuture.setSuccess(null);
-                    } else {
-                        closeFuture.setFailure(future.cause());
-                    }
+            poolClose.addListener(future -> {
+                if (future.isSuccess()) {
+                    closeFuture.setSuccess(null);
+                } else {
+                    closeFuture.setFailure(future.cause());
                 }
             });
             return poolClose;

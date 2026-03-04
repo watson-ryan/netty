@@ -20,7 +20,7 @@
   <parent>
     <groupId>io.netty</groupId>
     <artifactId>netty-parent</artifactId>
-    <version>4.1.86.Final-SNAPSHOT</version>
+    <version>4.2.11.Final-SNAPSHOT</version>
   </parent>
 
   <artifactId>netty-microbench</artifactId>
@@ -31,16 +31,14 @@
   <properties>
     <!-- Skip tests by default; run only if -DskipTests=false is specified -->
     <skipTests>true</skipTests>
-    <jmh.version>1.33</jmh.version>
+    <jmh.version>1.36</jmh.version>
     <!-- This only be set when run on linux as on other platforms we just want to include the jar without native
          code -->
     <epoll.classifier />
     <!-- This only be set when run on mac as on other platforms we just want to include the jar without native
          code -->
     <kqueue.classifier />
-    <japicmp.skip>true</japicmp.skip>
     <revapi.skip>true</revapi.skip>
-    <javaModuleName>io.netty.microbench</javaModuleName>
   </properties>
   <profiles>
     <profile>
@@ -96,7 +94,6 @@
           <plugin>
             <groupId>org.apache.maven.plugins</groupId>
             <artifactId>maven-shade-plugin</artifactId>
-            <version>2.2</version>
             <executions>
               <execution>
                 <phase>package</phase>
@@ -141,6 +138,11 @@
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
+      <artifactId>netty-codec-compression</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
       <artifactId>netty-codec-http</artifactId>
       <version>${project.version}</version>
     </dependency>
@@ -163,6 +165,17 @@
       <groupId>io.netty</groupId>
       <artifactId>netty-codec-stomp</artifactId>
       <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-codec-protobuf</artifactId>
+      <version>${project.version}</version>
+    </dependency>
+    <dependency>
+      <groupId>io.netty</groupId>
+      <artifactId>netty-jfr-stub</artifactId>
+      <version>${project.version}</version>
+      <scope>provided</scope>
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
@@ -207,6 +220,16 @@
       <artifactId>${tcnative.artifactId}</artifactId>
       <classifier>${tcnative.classifier}</classifier>
       <optional>false</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.jctools</groupId>
+      <artifactId>jctools-core</artifactId>
+      <scope>compile</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.jfree</groupId>
+      <artifactId>jfreechart</artifactId>
+      <version>1.5.6</version>
     </dependency>
   </dependencies>
 
@@ -254,7 +277,7 @@
                 <Export-Package>${project.groupId}.*</Export-Package>
                 <Export-Package>!*.generated.*</Export-Package>
                 <!-- enforce JVM vendor package as optional -->
-                <Import-Package>sun.nio.ch;resolution:=optional,org.eclipse.jetty.npn;version="[1,2)";resolution:=optional,org.eclipse.jetty.alpn;version="[1,2)";resolution:=optional,*</Import-Package>
+                <Import-Package>sun.nio.ch;resolution:=optional</Import-Package>
                 <!-- override "internal" private package convention -->
                 <Private-Package>!*</Private-Package>
               </instructions>

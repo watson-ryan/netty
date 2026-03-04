@@ -19,7 +19,9 @@ import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelOption;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.EventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.udt.UdtChannel;
 import io.netty.channel.udt.nio.NioUdtProvider;
 import io.netty.handler.logging.LogLevel;
@@ -38,15 +40,14 @@ public final class ByteEchoServer {
     static final int PORT = Integer.parseInt(System.getProperty("port", "8007"));
 
     public static void main(String[] args) throws Exception {
-        final ThreadFactory acceptFactory = new DefaultThreadFactory("accept");
-        final ThreadFactory connectFactory = new DefaultThreadFactory("connect");
-        final NioEventLoopGroup acceptGroup = new NioEventLoopGroup(1, acceptFactory, NioUdtProvider.BYTE_PROVIDER);
-        final NioEventLoopGroup connectGroup = new NioEventLoopGroup(1, connectFactory, NioUdtProvider.BYTE_PROVIDER);
+        final ThreadFactory factory = new DefaultThreadFactory("udt");
+        final EventLoopGroup group = new MultiThreadIoEventLoopGroup(
+                1, factory, NioIoHandler.newFactory(NioUdtProvider.BYTE_PROVIDER));
 
         // Configure the server.
         try {
             final ServerBootstrap boot = new ServerBootstrap();
-            boot.group(acceptGroup, connectGroup)
+            boot.group(group)
                     .channelFactory(NioUdtProvider.BYTE_ACCEPTOR)
                     .option(ChannelOption.SO_BACKLOG, 10)
                     .handler(new LoggingHandler(LogLevel.INFO))
@@ -65,8 +66,7 @@ public final class ByteEchoServer {
             future.channel().closeFuture().sync();
         } finally {
             // Shut down all event loops to terminate all threads.
-            acceptGroup.shutdownGracefully();
-            connectGroup.shutdownGracefully();
+            group.shutdownGracefully();
         }
     }
 }

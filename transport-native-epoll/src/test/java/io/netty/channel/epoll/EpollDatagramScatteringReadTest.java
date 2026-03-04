@@ -25,7 +25,6 @@ import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.socket.DatagramPacket;
 import io.netty.testsuite.transport.TestsuitePermutation;
 import io.netty.testsuite.transport.socket.AbstractDatagramTest;
-import io.netty.util.internal.PlatformDependent;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.TestInfo;
@@ -35,6 +34,7 @@ import java.net.SocketAddress;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -53,7 +53,7 @@ public class EpollDatagramScatteringReadTest extends AbstractDatagramTest  {
 
     @Override
     protected List<TestsuitePermutation.BootstrapComboFactory<Bootstrap, Bootstrap>> newFactories() {
-        return EpollSocketTestPermutation.INSTANCE.epollOnlyDatagram(internetProtocolFamily());
+        return EpollSocketTestPermutation.INSTANCE.epollOnlyDatagram(socketProtocolFamily());
     }
 
     @Test
@@ -113,12 +113,14 @@ public class EpollDatagramScatteringReadTest extends AbstractDatagramTest  {
     }
 
     private void testScatteringRead(Bootstrap sb, Bootstrap cb, boolean connected, boolean partial) throws Throwable {
-        int packetSize = 512;
+        int packetSize = 8;
         int numPackets = 4;
 
-        sb.option(ChannelOption.RCVBUF_ALLOCATOR, new AdaptiveRecvByteBufAllocator(
+        sb.option(ChannelOption.RECVBUF_ALLOCATOR, new AdaptiveRecvByteBufAllocator(
                 packetSize, packetSize * (partial ? numPackets / 2 : numPackets), 64 * 1024));
-        sb.option(EpollChannelOption.MAX_DATAGRAM_PAYLOAD_SIZE, packetSize);
+        // Set the MAX_DATAGRAM_PAYLOAD_SIZE to something bigger then the actual packet size.
+        // This will allow us to check if we correctly thread the received len.
+        sb.option(EpollChannelOption.MAX_DATAGRAM_PAYLOAD_SIZE, packetSize * 2);
 
         Channel sc = null;
         Channel cc = null;
@@ -134,11 +136,10 @@ public class EpollDatagramScatteringReadTest extends AbstractDatagramTest  {
             final SocketAddress ccAddress = cc.localAddress();
 
             final AtomicReference<Throwable> errorRef = new AtomicReference<Throwable>();
-            final byte[] bytes = new byte[packetSize];
-            PlatformDependent.threadLocalRandom().nextBytes(bytes);
 
             final CountDownLatch latch = new CountDownLatch(numPackets);
             sb.handler(new SimpleChannelInboundHandler<DatagramPacket>() {
+                private long numRead;
                 private int counter;
                 @Override
                 public void channelReadComplete(ChannelHandlerContext ctx) {
@@ -151,11 +152,10 @@ public class EpollDatagramScatteringReadTest extends AbstractDatagramTest  {
                 protected void channelRead0(ChannelHandlerContext ctx, DatagramPacket msg) {
                     assertEquals(ccAddress, msg.sender());
 
-                    assertEquals(bytes.length, msg.content().readableBytes());
-                    byte[] receivedBytes = new byte[bytes.length];
-                    msg.content().readBytes(receivedBytes);
-                    assertArrayEquals(bytes, receivedBytes);
-
+                    // Each packet contains a long which represent the write iteration.
+                    assertEquals(8, msg.content().readableBytes());
+                    assertEquals(numRead, msg.content().readLong());
+                    numRead++;
                     counter++;
                     latch.countDown();
                 }
@@ -177,7 +177,7 @@ public class EpollDatagramScatteringReadTest extends AbstractDatagramTest  {
 
             List<ChannelFuture> futures = new ArrayList<ChannelFuture>(numPackets);
             for (int i = 0; i < numPackets; i++) {
-                futures.add(cc.write(new DatagramPacket(cc.alloc().directBuffer().writeBytes(bytes), addr)));
+                futures.add(cc.write(new DatagramPacket(cc.alloc().directBuffer().writeLong(i), addr)));
             }
 
             cc.flush();
@@ -237,7 +237,7 @@ public class EpollDatagramScatteringReadTest extends AbstractDatagramTest  {
     private void testScatteringReadWithSmallBuffer0(Bootstrap sb, Bootstrap cb, boolean connected) throws Throwable {
         int packetSize = 16;
 
-        sb.option(ChannelOption.RCVBUF_ALLOCATOR, new AdaptiveRecvByteBufAllocator(1400, 1400, 64 * 1024));
+        sb.option(ChannelOption.RECVBUF_ALLOCATOR, new AdaptiveRecvByteBufAllocator(1400, 1400, 64 * 1024));
         sb.option(EpollChannelOption.MAX_DATAGRAM_PAYLOAD_SIZE, 1400);
 
         Channel sc = null;
@@ -255,7 +255,7 @@ public class EpollDatagramScatteringReadTest extends AbstractDatagramTest  {
 
             final AtomicReference<Throwable> errorRef = new AtomicReference<Throwable>();
             final byte[] bytes = new byte[packetSize];
-            PlatformDependent.threadLocalRandom().nextBytes(bytes);
+            ThreadLocalRandom.current().nextBytes(bytes);
 
             final CountDownLatch latch = new CountDownLatch(1);
             sb.handler(new SimpleChannelInboundHandler<DatagramPacket>() {

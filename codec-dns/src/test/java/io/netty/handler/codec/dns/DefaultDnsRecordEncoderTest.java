@@ -17,17 +17,53 @@ package io.netty.handler.codec.dns;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
-import io.netty.channel.socket.InternetProtocolFamily;
-import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.SocketUtils;
 import io.netty.util.internal.StringUtil;
 import org.junit.jupiter.api.Test;
 
+import java.net.Inet4Address;
 import java.net.InetAddress;
+import java.util.concurrent.ThreadLocalRandom;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
 public class DefaultDnsRecordEncoderTest {
+
+    @Test
+    public void testEncodePtr() throws Exception {
+        DefaultDnsRecordEncoder encoder = new DefaultDnsRecordEncoder();
+        DnsPtrRecord ptrRecord = new DefaultDnsPtrRecord("131.186.250.142.in-addr.arpa.",
+                DnsRecord.CLASS_IN, 80, "fra24s07-in-f3.1e100.net.");
+        ByteBuf out = Unpooled.buffer();
+        ByteBuf expectedBuf = Unpooled.buffer();
+        expectedBuf.writeBytes(
+                new byte[] {
+                        3, '1', '3', '1',
+                        3, '1', '8', '6',
+                        3, '2', '5', '0',
+                        3, '1', '4', '2',
+                        7, 'i', 'n', '-', 'a', 'd', 'd', 'r',
+                        4, 'a', 'r', 'p', 'a',
+                        0
+        });
+        expectedBuf.writeShort(DnsRecordType.PTR.intValue());
+        expectedBuf.writeShort(DnsRecord.CLASS_IN);
+        expectedBuf.writeInt(80);
+        byte[] hostname = new byte[] {
+                14, 'f', 'r', 'a', '2', '4', 's', '0', '7', '-', 'i', 'n', '-', 'f', '3',
+                5, '1', 'e', '1', '0', '0', 3, 'n', 'e', 't',
+                0
+        };
+        expectedBuf.writeShort(hostname.length);
+        expectedBuf.writeBytes(hostname);
+        try {
+            encoder.encodeRecord(ptrRecord, out);
+            assertEquals(expectedBuf, out);
+        } finally {
+            out.release();
+            expectedBuf.release();
+        }
+    }
 
     @Test
     public void testEncodeName() throws Exception {
@@ -134,7 +170,7 @@ public class DefaultDnsRecordEncoderTest {
             int rdataLength = out.readUnsignedShort();
             assertEquals(rdataLength, out.readableBytes());
 
-            assertEquals((short) InternetProtocolFamily.of(address).addressNumber(), out.readShort());
+            assertEquals((short) (address instanceof Inet4Address ? 1 : 2), out.readShort());
 
             assertEquals(prefix, out.readUnsignedByte());
             assertEquals(0, out.readUnsignedByte()); // This must be 0 for requests.
@@ -146,6 +182,6 @@ public class DefaultDnsRecordEncoderTest {
     }
 
     private static int nextInt(int max) {
-        return PlatformDependent.threadLocalRandom().nextInt(max);
+        return ThreadLocalRandom.current().nextInt(max);
     }
 }

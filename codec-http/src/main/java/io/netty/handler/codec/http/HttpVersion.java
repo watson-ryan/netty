@@ -15,15 +15,12 @@
  */
 package io.netty.handler.codec.http;
 
-import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
-import static io.netty.util.internal.ObjectUtil.checkNonEmptyAfterTrim;
-
 import io.netty.buffer.ByteBuf;
 import io.netty.util.CharsetUtil;
 import io.netty.util.internal.ObjectUtil;
 
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import static io.netty.util.internal.ObjectUtil.checkNonEmptyAfterTrim;
+import static io.netty.util.internal.ObjectUtil.checkPositiveOrZero;
 
 /**
  * The version of HTTP or its derived protocols, such as
@@ -32,11 +29,8 @@ import java.util.regex.Pattern;
  */
 public class HttpVersion implements Comparable<HttpVersion> {
 
-    private static final Pattern VERSION_PATTERN =
-        Pattern.compile("(\\S+)/(\\d+)\\.(\\d+)");
-
-    private static final String HTTP_1_0_STRING = "HTTP/1.0";
-    private static final String HTTP_1_1_STRING = "HTTP/1.1";
+    static final String HTTP_1_0_STRING = "HTTP/1.0";
+    static final String HTTP_1_1_STRING = "HTTP/1.1";
 
     /**
      * HTTP/1.0
@@ -57,7 +51,19 @@ public class HttpVersion implements Comparable<HttpVersion> {
      * returned.
      */
     public static HttpVersion valueOf(String text) {
+        return valueOf(text, false);
+    }
+
+    static HttpVersion valueOf(String text, boolean strict) {
         ObjectUtil.checkNotNull(text, "text");
+
+        // super fast-path
+        if (text == HTTP_1_1_STRING) {
+            return HTTP_1_1;
+        }
+        if (text == HTTP_1_0_STRING) {
+            return HTTP_1_0;
+        }
 
         text = text.trim();
 
@@ -75,7 +81,7 @@ public class HttpVersion implements Comparable<HttpVersion> {
         //
         HttpVersion version = version0(text);
         if (version == null) {
-            version = new HttpVersion(text, true);
+            version = new HttpVersion(text, strict, true);
         }
         return version;
     }
@@ -109,19 +115,66 @@ public class HttpVersion implements Comparable<HttpVersion> {
      *        the {@code "Connection"} header is set to {@code "close"} explicitly.
      */
     public HttpVersion(String text, boolean keepAliveDefault) {
+        this(text, false, keepAliveDefault);
+    }
+
+    HttpVersion(String text, boolean strict, boolean keepAliveDefault) {
         text = checkNonEmptyAfterTrim(text, "text").toUpperCase();
 
-        Matcher m = VERSION_PATTERN.matcher(text);
-        if (!m.matches()) {
-            throw new IllegalArgumentException("invalid version format: " + text);
+        if (strict) {
+            // Only single digit major / minor version is allowed.
+            // See
+            //  - https://datatracker.ietf.org/doc/html/rfc7230#section-2.6
+            //  - https://datatracker.ietf.org/doc/html/rfc9110#name-protocol-version
+            if (text.length() != 8 || !text.startsWith("HTTP/") || text.charAt(6) != '.') {
+                throw new IllegalArgumentException("invalid version format: " + text);
+            }
+            protocolName = "HTTP";
+            majorVersion = toDecimal(text.charAt(5));
+            minorVersion = toDecimal(text.charAt(7));
+        } else {
+            int slashIndex = text.indexOf('/');
+            int dotIndex = text.indexOf('.', slashIndex + 1);
+
+            if (slashIndex <= 0 || dotIndex <= slashIndex + 1
+                    || dotIndex >= text.length() - 1 || hasWhitespace(text, slashIndex)) {
+                throw new IllegalArgumentException("invalid version format: " + text);
+            }
+
+            protocolName = text.substring(0, slashIndex);
+            majorVersion = parseInt(text, slashIndex + 1, dotIndex);
+            minorVersion = parseInt(text, dotIndex + 1, text.length());
         }
 
-        protocolName = m.group(1);
-        majorVersion = Integer.parseInt(m.group(2));
-        minorVersion = Integer.parseInt(m.group(3));
         this.text = protocolName + '/' + majorVersion + '.' + minorVersion;
         this.keepAliveDefault = keepAliveDefault;
         bytes = null;
+    }
+
+    private static boolean hasWhitespace(String s, int end) {
+        for (int i = 0; i < end; i++) {
+            if (Character.isWhitespace(s.charAt(i))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static int parseInt(String text, int start, int end) {
+        int result = 0;
+        for (int i = start; i < end; i++) {
+            char ch = text.charAt(i);
+            result = result * 10 + toDecimal(ch);
+        }
+        return result;
+    }
+
+    private static int toDecimal(final int value) {
+        if (value < '0' || value > '9') {
+            throw new IllegalArgumentException("Invalid version number, only 0-9 (0x30-0x39) allowed," +
+                    " but received a '" + (char) value + "' (0x" + Integer.toHexString(value) + ")");
+        }
+        return value - '0';
     }
 
     /**

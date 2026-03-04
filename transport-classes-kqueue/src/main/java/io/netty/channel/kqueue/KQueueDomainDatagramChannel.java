@@ -31,7 +31,6 @@ import io.netty.channel.unix.UnixChannelUtil;
 import io.netty.util.CharsetUtil;
 import io.netty.util.UncheckedBooleanSupplier;
 import io.netty.util.internal.StringUtil;
-import io.netty.util.internal.UnstableApi;
 
 import java.io.IOException;
 import java.net.SocketAddress;
@@ -39,7 +38,6 @@ import java.nio.ByteBuffer;
 
 import static io.netty.channel.kqueue.BsdSocket.newSocketDomainDgram;
 
-@UnstableApi
 public final class KQueueDomainDatagramChannel extends AbstractKQueueDatagramChannel implements DomainDatagramChannel {
 
     private static final String EXPECTED_TYPES =
@@ -137,7 +135,7 @@ public final class KQueueDomainDatagramChannel extends AbstractKQueueDatagramCha
                         remoteAddress.path().getBytes(CharsetUtil.UTF_8));
             }
         } else if (data.nioBufferCount() > 1) {
-            IovArray array = ((KQueueEventLoop) eventLoop()).cleanArray();
+            IovArray array = ((NativeArrays) registration().attachment()).cleanIovArray();
             array.add(data, data.readerIndex(), data.readableBytes());
             int cnt = array.count();
             assert cnt != 0;
@@ -248,7 +246,6 @@ public final class KQueueDomainDatagramChannel extends AbstractKQueueDatagramCha
             final ChannelPipeline pipeline = pipeline();
             final ByteBufAllocator allocator = config.getAllocator();
             allocHandle.reset(config);
-            readReadyBefore();
 
             Throwable exception = null;
             try {
@@ -321,7 +318,9 @@ public final class KQueueDomainDatagramChannel extends AbstractKQueueDatagramCha
                     pipeline.fireExceptionCaught(exception);
                 }
             } finally {
-                readReadyFinally(config);
+                if (shouldStopReading(config)) {
+                    clearReadFilter0();
+                }
             }
         }
     }

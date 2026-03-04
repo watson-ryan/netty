@@ -20,16 +20,12 @@ import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.base64.Base64;
 import io.netty.util.CharsetUtil;
-import io.netty.util.internal.logging.InternalLogger;
-import io.netty.util.internal.logging.InternalLoggerFactory;
 
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileNotFoundException;
 import java.io.IOException;
 import java.io.InputStream;
-import java.io.OutputStream;
 import java.security.KeyException;
 import java.security.KeyStore;
 import java.security.cert.CertificateException;
@@ -43,8 +39,6 @@ import java.util.regex.Pattern;
  */
 final class PemReader {
 
-    private static final InternalLogger logger = InternalLoggerFactory.getInstance(PemReader.class);
-
     private static final Pattern CERT_HEADER = Pattern.compile(
             "-+BEGIN\\s[^-\\r\\n]*CERTIFICATE[^-\\r\\n]*-+(?:\\s|\\r|\\n)+");
     private static final Pattern CERT_FOOTER = Pattern.compile(
@@ -56,15 +50,9 @@ final class PemReader {
     private static final Pattern BODY = Pattern.compile("[a-z0-9+/=][a-z0-9+/=\\r\\n]*", Pattern.CASE_INSENSITIVE);
 
     static ByteBuf[] readCertificates(File file) throws CertificateException {
-        try {
-            InputStream in = new FileInputStream(file);
-
-            try {
-                return readCertificates(in);
-            } finally {
-                safeClose(in);
-            }
-        } catch (FileNotFoundException e) {
+        try (InputStream in = new FileInputStream(file)) {
+            return readCertificates(in);
+        } catch (IOException e) {
             throw new CertificateException("could not find certificate file: " + file);
         }
     }
@@ -84,14 +72,21 @@ final class PemReader {
             if (!m.find(start)) {
                 break;
             }
+
+            // Here and below it's necessary to save the position as it is reset
+            // after calling usePattern() on Android due to a bug.
+            //
+            // See https://issuetracker.google.com/issues/293206296
+            start = m.end();
             m.usePattern(BODY);
-            if (!m.find()) {
+            if (!m.find(start)) {
                 break;
             }
 
             ByteBuf base64 = Unpooled.copiedBuffer(m.group(0), CharsetUtil.US_ASCII);
+            start = m.end();
             m.usePattern(CERT_FOOTER);
-            if (!m.find()) {
+            if (!m.find(start)) {
                 // Certificate is incomplete.
                 break;
             }
@@ -111,15 +106,9 @@ final class PemReader {
     }
 
     static ByteBuf readPrivateKey(File file) throws KeyException {
-        try {
-            InputStream in = new FileInputStream(file);
-
-            try {
-                return readPrivateKey(in);
-            } finally {
-                safeClose(in);
-            }
-        } catch (FileNotFoundException e) {
+        try (InputStream in = new FileInputStream(file)) {
+            return readPrivateKey(in);
+        } catch (IOException e) {
             throw new KeyException("could not find key file: " + file);
         }
     }
@@ -131,19 +120,21 @@ final class PemReader {
         } catch (IOException e) {
             throw new KeyException("failed to read key input stream", e);
         }
-
+        int start = 0;
         Matcher m = KEY_HEADER.matcher(content);
-        if (!m.find()) {
+        if (!m.find(start)) {
             throw keyNotFoundException();
         }
+        start = m.end();
         m.usePattern(BODY);
-        if (!m.find()) {
+        if (!m.find(start)) {
             throw keyNotFoundException();
         }
 
         ByteBuf base64 = Unpooled.copiedBuffer(m.group(0), CharsetUtil.US_ASCII);
+        start = m.end();
         m.usePattern(KEY_FOOTER);
-        if (!m.find()) {
+        if (!m.find(start)) {
             // Key is incomplete.
             throw keyNotFoundException();
         }
@@ -159,35 +150,15 @@ final class PemReader {
 
     private static String readContent(InputStream in) throws IOException {
         ByteArrayOutputStream out = new ByteArrayOutputStream();
-        try {
-            byte[] buf = new byte[8192];
-            for (;;) {
-                int ret = in.read(buf);
-                if (ret < 0) {
-                    break;
-                }
-                out.write(buf, 0, ret);
+        byte[] buf = new byte[8192];
+        for (;;) {
+            int ret = in.read(buf);
+            if (ret < 0) {
+                break;
             }
-            return out.toString(CharsetUtil.US_ASCII.name());
-        } finally {
-            safeClose(out);
+            out.write(buf, 0, ret);
         }
-    }
-
-    private static void safeClose(InputStream in) {
-        try {
-            in.close();
-        } catch (IOException e) {
-            logger.warn("Failed to close a stream.", e);
-        }
-    }
-
-    private static void safeClose(OutputStream out) {
-        try {
-            out.close();
-        } catch (IOException e) {
-            logger.warn("Failed to close a stream.", e);
-        }
+        return out.toString(CharsetUtil.US_ASCII.name());
     }
 
     private PemReader() { }

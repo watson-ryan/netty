@@ -24,11 +24,13 @@ import io.netty.channel.ChannelMetadata;
 import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.FileRegion;
+import io.netty.channel.IoRegistration;
 import io.netty.channel.RecvByteBufAllocator;
 import io.netty.channel.internal.ChannelUtils;
 import io.netty.channel.socket.ChannelInputShutdownEvent;
 import io.netty.channel.socket.ChannelInputShutdownReadComplete;
 import io.netty.channel.socket.SocketChannelConfig;
+import io.netty.util.LeakPresenceDetector;
 import io.netty.util.internal.StringUtil;
 
 import java.io.IOException;
@@ -36,6 +38,7 @@ import java.nio.channels.SelectableChannel;
 import java.nio.channels.SelectionKey;
 
 import static io.netty.channel.internal.ChannelUtils.WRITE_STATUS_SNDBUF_FULL;
+import static io.netty.util.internal.StringUtil.className;
 
 /**
  * {@link AbstractNioChannel} base class for {@link Channel}s that operate on bytes.
@@ -115,7 +118,11 @@ public abstract class AbstractNioByteChannel extends AbstractNioChannel {
             if (byteBuf != null) {
                 if (byteBuf.isReadable()) {
                     readPending = false;
-                    pipeline.fireChannelRead(byteBuf);
+                    try {
+                        pipeline.fireChannelRead(byteBuf);
+                    } catch (Exception e) {
+                        cause.addSuppressed(e);
+                    }
                 } else {
                     byteBuf.release();
                 }
@@ -126,7 +133,10 @@ public abstract class AbstractNioByteChannel extends AbstractNioChannel {
 
             // If oom will close the read event, release connection.
             // See https://github.com/netty/netty/issues/10434
-            if (close || cause instanceof OutOfMemoryError || cause instanceof IOException) {
+            if (close ||
+                    cause instanceof OutOfMemoryError ||
+                    cause instanceof LeakPresenceDetector.AllocationProhibitedException ||
+                    cause instanceof IOException) {
                 closeOnRead(pipeline);
             }
         }
@@ -245,7 +255,7 @@ public abstract class AbstractNioByteChannel extends AbstractNioChannel {
             }
         } else {
             // Should not reach here.
-            throw new Error();
+            throw new Error("Unexpected message type: " + className(msg));
         }
         return WRITE_STATUS_SNDBUF_FULL;
     }
@@ -323,30 +333,25 @@ public abstract class AbstractNioByteChannel extends AbstractNioChannel {
     protected abstract int doWriteBytes(ByteBuf buf) throws Exception;
 
     protected final void setOpWrite() {
-        final SelectionKey key = selectionKey();
+        final IoRegistration registration = registration();
         // Check first if the key is still valid as it may be canceled as part of the deregistration
         // from the EventLoop
         // See https://github.com/netty/netty/issues/2104
-        if (!key.isValid()) {
+        if (!registration.isValid()) {
             return;
         }
-        final int interestOps = key.interestOps();
-        if ((interestOps & SelectionKey.OP_WRITE) == 0) {
-            key.interestOps(interestOps | SelectionKey.OP_WRITE);
-        }
+
+        addAndSubmit(NioIoOps.WRITE);
     }
 
     protected final void clearOpWrite() {
-        final SelectionKey key = selectionKey();
+        final IoRegistration registration = registration();
         // Check first if the key is still valid as it may be canceled as part of the deregistration
         // from the EventLoop
         // See https://github.com/netty/netty/issues/2104
-        if (!key.isValid()) {
+        if (!registration.isValid()) {
             return;
         }
-        final int interestOps = key.interestOps();
-        if ((interestOps & SelectionKey.OP_WRITE) != 0) {
-            key.interestOps(interestOps & ~SelectionKey.OP_WRITE);
-        }
+        removeAndSubmit(NioIoOps.WRITE);
     }
 }

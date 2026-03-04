@@ -22,6 +22,7 @@ import io.netty.channel.ChannelOutboundBuffer;
 import io.netty.channel.socket.InternetProtocolFamily;
 import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.socket.SocketChannel;
+import io.netty.channel.socket.SocketProtocolFamily;
 import io.netty.util.concurrent.GlobalEventExecutor;
 
 import java.io.IOException;
@@ -51,7 +52,17 @@ public final class EpollSocketChannel extends AbstractEpollStreamChannel impleme
         config = new EpollSocketChannelConfig(this);
     }
 
+    /**
+     *
+     * @deprecated use {@link EpollServerSocketChannel#EpollServerSocketChannel(SocketProtocolFamily)}.
+     */
+    @Deprecated
     public EpollSocketChannel(InternetProtocolFamily protocol) {
+        super(newSocketStream(protocol), false);
+        config = new EpollSocketChannelConfig(this);
+    }
+
+    public EpollSocketChannel(SocketProtocolFamily protocol) {
         super(newSocketStream(protocol), false);
         config = new EpollSocketChannelConfig(this);
     }
@@ -155,7 +166,7 @@ public final class EpollSocketChannel extends AbstractEpollStreamChannel impleme
                     // because we try to read or write until the actual close happens which may be later due
                     // SO_LINGER handling.
                     // See https://github.com/netty/netty/issues/4449
-                    ((EpollEventLoop) eventLoop()).remove(EpollSocketChannel.this);
+                    registration().cancel();
                     return GlobalEventExecutor.INSTANCE;
                 }
             } catch (Throwable ignore) {

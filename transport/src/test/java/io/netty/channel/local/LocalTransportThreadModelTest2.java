@@ -22,7 +22,7 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelHandler.Sharable;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
-import io.netty.channel.DefaultEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
@@ -44,14 +44,14 @@ public class LocalTransportThreadModelTest2 {
         ServerBootstrap serverBootstrap = new ServerBootstrap();
         LocalHandler serverHandler = new LocalHandler("SERVER");
         serverBootstrap
-                .group(new DefaultEventLoopGroup(), new DefaultEventLoopGroup())
+                .group(new MultiThreadIoEventLoopGroup(LocalIoHandler.newFactory()))
                 .channel(LocalServerChannel.class)
                 .childHandler(serverHandler);
 
         Bootstrap clientBootstrap = new Bootstrap();
         LocalHandler clientHandler = new LocalHandler("CLIENT");
         clientBootstrap
-                .group(new DefaultEventLoopGroup())
+                .group(new MultiThreadIoEventLoopGroup(LocalIoHandler.newFactory()))
                 .channel(LocalChannel.class)
                 .remoteAddress(new LocalAddress(LOCAL_CHANNEL)).handler(clientHandler);
 
@@ -71,6 +71,8 @@ public class LocalTransportThreadModelTest2 {
 
         assertEquals(count * 2 * messageCountPerRun, serverHandler.count.get() +
                 clientHandler.count.get());
+        serverBootstrap.config().group().shutdownGracefully().sync();
+        clientBootstrap.config().group().shutdownGracefully().sync();
     }
 
     public void close(final Channel localChannel, final LocalHandler localRegistrationHandler) {

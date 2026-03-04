@@ -17,6 +17,8 @@ package io.netty.handler.ssl;
 
 import io.netty.buffer.ByteBufAllocator;
 
+import java.util.List;
+import javax.net.ssl.SNIServerName;
 import javax.net.ssl.SSLEngine;
 
 /**
@@ -28,14 +30,19 @@ import javax.net.ssl.SSLEngine;
  */
 public final class OpenSslEngine extends ReferenceCountedOpenSslEngine {
     OpenSslEngine(OpenSslContext context, ByteBufAllocator alloc, String peerHost, int peerPort,
-                  boolean jdkCompatibilityMode) {
-        super(context, alloc, peerHost, peerPort, jdkCompatibilityMode, false);
+                  boolean jdkCompatibilityMode, String endpointIdentificationAlgorithm,
+                  List<SNIServerName> serverNames) {
+        super(context, alloc, peerHost, peerPort, jdkCompatibilityMode, false, endpointIdentificationAlgorithm,
+                serverNames);
     }
 
     @Override
     @SuppressWarnings("FinalizeDeclaration")
     protected void finalize() throws Throwable {
-        super.finalize();
-        OpenSsl.releaseIfNeeded(this);
+        try {
+            OpenSsl.releaseIfNeeded(this);
+        } finally {
+            super.finalize();
+        }
     }
 }

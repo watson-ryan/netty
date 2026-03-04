@@ -41,11 +41,12 @@ import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
-
 import javax.crypto.NoSuchPaddingException;
 import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SNIServerName;
 import javax.net.ssl.SSLContext;
 import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLParameters;
 import javax.net.ssl.SSLSessionContext;
 
 import static io.netty.handler.ssl.SslUtils.DEFAULT_CIPHER_SUITES;
@@ -190,6 +191,8 @@ public class JdkSslContext extends SslContext {
     private final ClientAuth clientAuth;
     private final SSLContext sslContext;
     private final boolean isClient;
+    private final String endpointIdentificationAlgorithm;
+    private final List<SNIServerName> serverNames;
 
     /**
      * Creates a new {@link JdkSslContext} from a pre-configured {@link SSLContext}.
@@ -259,10 +262,20 @@ public class JdkSslContext extends SslContext {
     @SuppressWarnings("deprecation")
     JdkSslContext(SSLContext sslContext, boolean isClient, Iterable<String> ciphers, CipherSuiteFilter cipherFilter,
                   JdkApplicationProtocolNegotiator apn, ClientAuth clientAuth, String[] protocols, boolean startTls) {
-        super(startTls);
+        this(sslContext, isClient, ciphers, cipherFilter, apn, clientAuth, protocols, startTls, null, null, null);
+    }
+
+    @SuppressWarnings("deprecation")
+    JdkSslContext(SSLContext sslContext, boolean isClient, Iterable<String> ciphers, CipherSuiteFilter cipherFilter,
+                  JdkApplicationProtocolNegotiator apn, ClientAuth clientAuth, String[] protocols, boolean startTls,
+                  String endpointIdentificationAlgorithm, List<SNIServerName> serverNames,
+                  ResumptionController resumptionController) {
+        super(startTls, resumptionController);
         this.apn = checkNotNull(apn, "apn");
         this.clientAuth = checkNotNull(clientAuth, "clientAuth");
         this.sslContext = checkNotNull(sslContext, "sslContext");
+        this.endpointIdentificationAlgorithm = endpointIdentificationAlgorithm;
+        this.serverNames = serverNames;
 
         final List<String> defaultCiphers;
         final Set<String> supportedCiphers;
@@ -363,15 +376,25 @@ public class JdkSslContext extends SslContext {
                 case NONE:
                     break; // exhaustive cases
                 default:
-                    throw new Error("Unknown auth " + clientAuth);
+                    throw new Error("Unexpected auth " + clientAuth);
             }
         }
+        configureSSLParameters(engine);
         JdkApplicationProtocolNegotiator.SslEngineWrapperFactory factory = apn.wrapperFactory();
         if (factory instanceof JdkApplicationProtocolNegotiator.AllocatorAwareSslEngineWrapperFactory) {
             return ((JdkApplicationProtocolNegotiator.AllocatorAwareSslEngineWrapperFactory) factory)
                     .wrapSslEngine(engine, alloc, apn, isServer());
         }
         return factory.wrapSslEngine(engine, apn, isServer());
+    }
+
+    private void configureSSLParameters(SSLEngine engine) {
+        SSLParameters params = engine.getSSLParameters();
+        params.setEndpointIdentificationAlgorithm(endpointIdentificationAlgorithm);
+        if (serverNames != null && !serverNames.isEmpty()) {
+            params.setServerNames(serverNames);
+        }
+        engine.setSSLParameters(params);
     }
 
     @Override
@@ -414,28 +437,6 @@ public class JdkSslContext extends SslContext {
                 default:
                     throw new UnsupportedOperationException(new StringBuilder("JDK provider does not support ")
                     .append(config.selectedListenerFailureBehavior()).append(" failure behavior").toString());
-                }
-            }
-        case NPN:
-            if (isServer) {
-                switch(config.selectedListenerFailureBehavior()) {
-                case ACCEPT:
-                    return new JdkNpnApplicationProtocolNegotiator(false, config.supportedProtocols());
-                case FATAL_ALERT:
-                    return new JdkNpnApplicationProtocolNegotiator(true, config.supportedProtocols());
-                default:
-                    throw new UnsupportedOperationException(new StringBuilder("JDK provider does not support ")
-                    .append(config.selectedListenerFailureBehavior()).append(" failure behavior").toString());
-                }
-            } else {
-                switch(config.selectorFailureBehavior()) {
-                case FATAL_ALERT:
-                    return new JdkNpnApplicationProtocolNegotiator(true, config.supportedProtocols());
-                case NO_ADVERTISE:
-                    return new JdkNpnApplicationProtocolNegotiator(false, config.supportedProtocols());
-                default:
-                    throw new UnsupportedOperationException(new StringBuilder("JDK provider does not support ")
-                    .append(config.selectorFailureBehavior()).append(" failure behavior").toString());
                 }
             }
         default:

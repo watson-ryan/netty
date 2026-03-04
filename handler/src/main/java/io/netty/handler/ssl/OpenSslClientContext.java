@@ -21,14 +21,17 @@ import java.io.File;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.cert.X509Certificate;
+import java.util.List;
 import java.util.Map;
 
 import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SNIServerName;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 
 import static io.netty.handler.ssl.ReferenceCountedOpenSslClientContext.newSessionContext;
+import static io.netty.util.internal.EmptyArrays.EMPTY_MAP_ENTRY;
 
 /**
  * A client-side {@link SslContext} which uses OpenSSL's SSL/TLS implementation.
@@ -178,24 +181,30 @@ public final class OpenSslClientContext extends OpenSslContext {
         this(toX509CertificatesInternal(trustCertCollectionFile), trustManagerFactory,
                 toX509CertificatesInternal(keyCertChainFile), toPrivateKeyInternal(keyFile, keyPassword),
                 keyPassword, keyManagerFactory, ciphers, cipherFilter, apn, null, sessionCacheSize,
-                sessionTimeout, false, KeyStore.getDefaultType());
+                sessionTimeout, false, KeyStore.getDefaultType(), null, null, null, EMPTY_MAP_ENTRY, null);
     }
 
     OpenSslClientContext(X509Certificate[] trustCertCollection, TrustManagerFactory trustManagerFactory,
                          X509Certificate[] keyCertChain, PrivateKey key, String keyPassword,
-                                KeyManagerFactory keyManagerFactory, Iterable<String> ciphers,
-                                CipherSuiteFilter cipherFilter, ApplicationProtocolConfig apn, String[] protocols,
-                                long sessionCacheSize, long sessionTimeout, boolean enableOcsp, String keyStore,
-                         Map.Entry<SslContextOption<?>, Object>... options)
+                         KeyManagerFactory keyManagerFactory, Iterable<String> ciphers,
+                         CipherSuiteFilter cipherFilter, ApplicationProtocolConfig apn, String[] protocols,
+                         long sessionCacheSize, long sessionTimeout, boolean enableOcsp, String keyStore,
+                         String endpointIdentificationAlgorithm, List<SNIServerName> serverNames,
+                         ResumptionController resumptionController,
+                         Map.Entry<SslContextOption<?>, Object>[] options,
+                         List<OpenSslCredential> credentials)
             throws SSLException {
-        super(ciphers, cipherFilter, apn, SSL.SSL_MODE_CLIENT, keyCertChain,
-                ClientAuth.NONE, protocols, false, enableOcsp, options);
+        super(ciphers, cipherFilter, apn, SSL.SSL_MODE_CLIENT, keyCertChain, ClientAuth.NONE, protocols, false,
+                endpointIdentificationAlgorithm, enableOcsp, serverNames, resumptionController, options, credentials);
         boolean success = false;
+        boolean supportJdkSignatureFallback = isJdkSignatureFallbackEnabled(options);
         try {
-            OpenSslKeyMaterialProvider.validateKeyMaterialSupported(keyCertChain, key, keyPassword);
-            sessionContext = newSessionContext(this, ctx, engineMap, trustCertCollection, trustManagerFactory,
+            OpenSslKeyMaterialProvider.validateKeyMaterialSupported(keyCertChain, key, keyPassword,
+                                                                    supportJdkSignatureFallback);
+            sessionContext = newSessionContext(this, ctx, engines, trustCertCollection, trustManagerFactory,
                                                keyCertChain, key, keyPassword, keyManagerFactory, keyStore,
-                                               sessionCacheSize, sessionTimeout);
+                                               sessionCacheSize, sessionTimeout, resumptionController,
+                                               supportJdkSignatureFallback);
             success = true;
         } finally {
             if (!success) {

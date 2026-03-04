@@ -27,7 +27,8 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.nio.NioDatagramChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
@@ -37,7 +38,8 @@ import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import io.netty.handler.ssl.SslProvider;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
-import io.netty.handler.ssl.util.SelfSignedCertificate;
+import io.netty.pkitesting.CertificateBuilder;
+import io.netty.pkitesting.X509Bundle;
 import io.netty.resolver.dns.DnsNameResolverBuilder;
 import io.netty.resolver.dns.DnsServerAddressStreamProviders;
 import io.netty.util.HashedWheelTimer;
@@ -51,15 +53,14 @@ import io.netty.util.concurrent.ImmediateExecutor;
 import io.netty.util.concurrent.ScheduledFuture;
 import io.netty.util.concurrent.SingleThreadEventExecutor;
 import io.netty.util.internal.Hidden.NettyBlockHoundIntegration;
-import org.hamcrest.Matchers;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
-import org.junit.jupiter.api.condition.DisabledIf;
 import reactor.blockhound.BlockHound;
 import reactor.blockhound.BlockingOperationError;
 import reactor.blockhound.integration.BlockHoundIntegration;
 
+import java.io.File;
 import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.List;
@@ -80,22 +81,19 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
 import static io.netty.buffer.Unpooled.wrappedBuffer;
-import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
-@DisabledIf("isDisabledIfJavaVersion18OrAbove")
 public class NettyBlockHoundIntegrationTest {
-
-    private static boolean isDisabledIfJavaVersion18OrAbove() {
-        return PlatformDependent.javaVersion() >= 18;
-    }
 
     @BeforeAll
     public static void setUpClass() {
+        assumeFalse(PlatformDependent.javaVersion() == 26, "Fails on JDK26, possible Blockhound bug?");
         BlockHound.install();
     }
 
@@ -122,7 +120,7 @@ public class NettyBlockHoundIntegrationTest {
             future.get(5, TimeUnit.SECONDS);
             fail("Expected an exception due to a blocking call but none was thrown");
         } catch (ExecutionException e) {
-            assertThat(e.getCause(), Matchers.instanceOf(BlockingOperationError.class));
+            assertInstanceOf(BlockingOperationError.class, e.getCause());
         }
     }
 
@@ -257,6 +255,7 @@ public class NettyBlockHoundIntegrationTest {
             testHandshakeWithExecutor(executorService, "TLSv1.2");
         } finally {
             executorService.shutdown();
+            assertTrue(executorService.awaitTermination(5, TimeUnit.SECONDS));
         }
     }
 
@@ -268,6 +267,7 @@ public class NettyBlockHoundIntegrationTest {
             testHandshakeWithExecutor(executorService, "TLSv1.3");
         } finally {
             executorService.shutdown();
+            assertTrue(executorService.awaitTermination(5, TimeUnit.SECONDS));
         }
     }
 
@@ -295,13 +295,13 @@ public class NettyBlockHoundIntegrationTest {
 
     @Test
     public void testSslHandlerWrapAllowsBlockingCalls() throws Exception {
-        final SslContext sslClientCtx =
-                SslContextBuilder.forClient()
-                                 .trustManager(InsecureTrustManagerFactory.INSTANCE)
-                                 .sslProvider(SslProvider.JDK)
-                                 .build();
+        final SslContext sslClientCtx = SslContextBuilder.forClient()
+                .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                .sslProvider(SslProvider.JDK)
+                .endpointIdentificationAlgorithm(null)
+                .build();
         final SslHandler sslHandler = sslClientCtx.newHandler(UnpooledByteBufAllocator.DEFAULT);
-        final EventLoopGroup group = new NioEventLoopGroup();
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
         final CountDownLatch activeLatch = new CountDownLatch(1);
         final AtomicReference<Throwable> error = new AtomicReference<>();
 
@@ -410,10 +410,10 @@ public class NettyBlockHoundIntegrationTest {
     @Timeout(value = 5000, unit = TimeUnit.MILLISECONDS)
     public void testUnixResolverDnsServerAddressStreamProvider_ParseEtcResolverSearchDomainsAndOptions()
             throws InterruptedException {
-        NioEventLoopGroup group = new NioEventLoopGroup();
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
         try {
             DnsNameResolverBuilder builder = new DnsNameResolverBuilder(group.next())
-                    .channelFactory(NioDatagramChannel::new);
+                    .datagramChannelFactory(NioDatagramChannel::new);
             doTestParseResolverFilesAllowsBlockingCalls(builder::build);
         } finally {
             group.shutdownGracefully();
@@ -455,23 +455,20 @@ public class NettyBlockHoundIntegrationTest {
     }
 
     private static void testTrustManagerVerify(SslProvider provider, String tlsVersion) throws Exception {
-        final SslContext sslClientCtx =
-                SslContextBuilder.forClient()
-                                 .sslProvider(provider)
-                                 .protocols(tlsVersion)
-                                 .trustManager(ResourcesUtil.getFile(
-                                         NettyBlockHoundIntegrationTest.class, "mutual_auth_ca.pem"))
-                                 .build();
+        final SslContext sslClientCtx = SslContextBuilder.forClient()
+                .sslProvider(provider)
+                .protocols(tlsVersion)
+                .endpointIdentificationAlgorithm(null)
+                .trustManager(ResourcesUtil.getFile(
+                        NettyBlockHoundIntegrationTest.class, "mutual_auth_ca.pem"))
+                .build();
 
-        final SslContext sslServerCtx =
-                SslContextBuilder.forServer(ResourcesUtil.getFile(
-                        NettyBlockHoundIntegrationTest.class, "localhost_server.pem"),
-                                            ResourcesUtil.getFile(
-                                                    NettyBlockHoundIntegrationTest.class, "localhost_server.key"),
-                                            null)
-                                 .sslProvider(provider)
-                                 .protocols(tlsVersion)
-                                 .build();
+        File cert = ResourcesUtil.getFile(NettyBlockHoundIntegrationTest.class, "localhost_server.pem");
+        File key = ResourcesUtil.getFile(NettyBlockHoundIntegrationTest.class, "localhost_server.key");
+        final SslContext sslServerCtx = SslContextBuilder.forServer(cert, key, null)
+                .sslProvider(provider)
+                .protocols(tlsVersion)
+                .build();
 
         final SslHandler clientSslHandler = sslClientCtx.newHandler(UnpooledByteBufAllocator.DEFAULT);
         final SslHandler serverSslHandler = sslServerCtx.newHandler(UnpooledByteBufAllocator.DEFAULT);
@@ -482,10 +479,14 @@ public class NettyBlockHoundIntegrationTest {
     private static void testHandshakeWithExecutor(Executor executor, String tlsVersion) throws Exception {
         final SslContext sslClientCtx = SslContextBuilder.forClient()
                 .trustManager(InsecureTrustManagerFactory.INSTANCE)
+                .endpointIdentificationAlgorithm(null)
                 .sslProvider(SslProvider.JDK).protocols(tlsVersion).build();
 
-        final SelfSignedCertificate cert = new SelfSignedCertificate();
-        final SslContext sslServerCtx = SslContextBuilder.forServer(cert.key(), cert.cert())
+        X509Bundle cert = new CertificateBuilder()
+                .subject("cn=localhost")
+                .setIsCertificateAuthority(true)
+                .buildSelfSigned();
+        final SslContext sslServerCtx = SslContextBuilder.forServer(cert.toKeyManagerFactory())
                 .sslProvider(SslProvider.JDK).protocols(tlsVersion).build();
 
         final SslHandler clientSslHandler = sslClientCtx.newHandler(UnpooledByteBufAllocator.DEFAULT, executor);
@@ -496,7 +497,7 @@ public class NettyBlockHoundIntegrationTest {
 
     private static void testHandshake(SslContext sslClientCtx, SslHandler clientSslHandler,
                                       SslHandler serverSslHandler) throws Exception {
-        EventLoopGroup group = new NioEventLoopGroup();
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
         Channel sc = null;
         Channel cc = null;
         try {

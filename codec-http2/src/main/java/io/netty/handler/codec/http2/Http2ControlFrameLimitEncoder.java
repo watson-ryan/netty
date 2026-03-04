@@ -29,16 +29,11 @@ import io.netty.util.internal.logging.InternalLoggerFactory;
  */
 final class Http2ControlFrameLimitEncoder extends DecoratingHttp2ConnectionEncoder {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(Http2ControlFrameLimitEncoder.class);
+    private int outstandingControlFrames;
 
     private final int maxOutstandingControlFrames;
-    private final ChannelFutureListener outstandingControlFramesListener = new ChannelFutureListener() {
-        @Override
-        public void operationComplete(ChannelFuture future) {
-            outstandingControlFrames--;
-        }
-    };
+    private final ChannelFutureListener outstandingControlFramesListener = f-> outstandingControlFrames--;
     private Http2LifecycleManager lifecycleManager;
-    private int outstandingControlFrames;
     private boolean limitReached;
 
     Http2ControlFrameLimitEncoder(Http2ConnectionEncoder delegate, int maxOutstandingControlFrames) {
@@ -95,8 +90,8 @@ final class Http2ControlFrameLimitEncoder extends DecoratingHttp2ConnectionEncod
                 limitReached = true;
                 Http2Exception exception = Http2Exception.connectionError(Http2Error.ENHANCE_YOUR_CALM,
                         "Maximum number %d of outstanding control frames reached", maxOutstandingControlFrames);
-                logger.info("Maximum number {} of outstanding control frames reached. Closing channel {}",
-                        maxOutstandingControlFrames, ctx.channel(), exception);
+                logger.info("{} Maximum number {} of outstanding control frames reached, closing channel.",
+                        ctx.channel(), maxOutstandingControlFrames, exception);
 
                 // First notify the Http2LifecycleManager and then close the connection.
                 lifecycleManager.onError(ctx, true, exception);

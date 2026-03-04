@@ -17,38 +17,38 @@ package io.netty.channel.epoll;
 
 import io.netty.channel.ChannelException;
 import io.netty.channel.DefaultFileRegion;
+import io.netty.channel.socket.InternetProtocolFamily;
+import io.netty.channel.socket.SocketProtocolFamily;
+import io.netty.channel.unix.Errors;
 import io.netty.channel.unix.NativeInetAddress;
 import io.netty.channel.unix.PeerCredentials;
 import io.netty.channel.unix.Socket;
-import io.netty.channel.socket.InternetProtocolFamily;
-import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.SocketUtils;
 import io.netty.util.internal.UnstableApi;
 
 import java.io.IOException;
-import java.net.InetAddress;
 import java.net.Inet6Address;
+import java.net.InetAddress;
 import java.net.NetworkInterface;
 import java.net.UnknownHostException;
 import java.util.Enumeration;
 
 import static io.netty.channel.unix.Errors.ioResult;
+import static io.netty.channel.unix.Errors.newIOException;
 
 /**
  * A socket which provides access Linux native methods.
  */
 @UnstableApi
 public final class LinuxSocket extends Socket {
-    static final InetAddress INET6_ANY = unsafeInetAddrByName("::");
-    private static final InetAddress INET_ANY = unsafeInetAddrByName("0.0.0.0");
     private static final long MAX_UINT32_T = 0xFFFFFFFFL;
 
     LinuxSocket(int fd) {
         super(fd);
     }
 
-    InternetProtocolFamily family() {
-        return ipv6 ? InternetProtocolFamily.IPv6 : InternetProtocolFamily.IPv4;
+    SocketProtocolFamily family() {
+        return ipv6 ? SocketProtocolFamily.INET6 : SocketProtocolFamily.INET;
     }
 
     int sendmmsg(NativeDatagramPacketArray.NativeDatagramPacket[] msgs,
@@ -75,8 +75,8 @@ public final class LinuxSocket extends Socket {
     }
 
     void setNetworkInterface(NetworkInterface netInterface) throws IOException {
-        InetAddress address = deriveInetAddress(netInterface, family() == InternetProtocolFamily.IPv6);
-        if (address.equals(family() == InternetProtocolFamily.IPv4 ? INET_ANY : INET6_ANY)) {
+        InetAddress address = deriveInetAddress(netInterface, family() == SocketProtocolFamily.INET6);
+        if (address.equals(family() == SocketProtocolFamily.INET ? Native.INET_ANY : Native.INET6_ANY)) {
             throw new IOException("NetworkInterface does not support " + family());
         }
         final NativeInetAddress nativeAddress = NativeInetAddress.newInstance(address);
@@ -97,7 +97,7 @@ public final class LinuxSocket extends Socket {
     NetworkInterface getNetworkInterface() throws IOException {
         int ret = getInterface(intValue(), ipv6);
         if (ipv6) {
-            return PlatformDependent.javaVersion() >= 7 ? NetworkInterface.getByIndex(ret) : null;
+            return NetworkInterface.getByIndex(ret);
         }
         InetAddress address = inetAddress(ret);
         return address != null ? NetworkInterface.getByInetAddress(address) : null;
@@ -151,15 +151,13 @@ public final class LinuxSocket extends Socket {
     }
 
     private static int interfaceIndex(NetworkInterface networkInterface) {
-        return PlatformDependent.javaVersion() >= 7 ? networkInterface.getIndex() : -1;
+        return networkInterface.getIndex();
     }
 
     private static int interfaceIndex(InetAddress address) throws IOException {
-        if (PlatformDependent.javaVersion() >= 7) {
-            NetworkInterface iface = NetworkInterface.getByInetAddress(address);
-            if (iface != null) {
-                return iface.getIndex();
-            }
+        NetworkInterface iface = NetworkInterface.getByInetAddress(address);
+        if (iface != null) {
+            return iface.getIndex();
         }
         return -1;
     }
@@ -205,6 +203,14 @@ public final class LinuxSocket extends Socket {
 
     void setTcpUserTimeout(int milliseconds) throws IOException {
         setTcpUserTimeout(intValue(), milliseconds);
+    }
+
+    void setIpBindAddressNoPort(boolean enabled) throws IOException {
+        setIpBindAddressNoPort(intValue(), enabled ? 1 : 0);
+    }
+
+    void setIpMulticastAll(boolean enabled) throws IOException {
+        setIpMulticastAll(intValue(), ipv6, enabled ? 1 : 0);
     }
 
     void setIpFreeBind(boolean enabled) throws IOException {
@@ -268,6 +274,14 @@ public final class LinuxSocket extends Socket {
         return getTcpUserTimeout(intValue());
     }
 
+    boolean isIpBindAddressNoPort() throws IOException {
+        return isIpBindAddressNoPort(intValue()) != 0;
+    }
+
+    boolean isIpMulticastAll() throws IOException {
+        return isIpMulticastAll(intValue(), ipv6) != 0;
+    }
+
     boolean isIpFreeBind() throws IOException {
         return isIpFreeBind(intValue()) != 0;
     }
@@ -312,8 +326,48 @@ public final class LinuxSocket extends Socket {
         return ioResult("sendfile", (int) res);
     }
 
+    public void bindVSock(VSockAddress address) throws IOException {
+        int res = bindVSock(/*fd*/intValue(), address.getCid(), address.getPort());
+        if (res < 0) {
+            throw newIOException("bindVSock", res);
+        }
+    }
+
+    public boolean connectVSock(VSockAddress address) throws IOException {
+        int res = connectVSock(/*fd*/intValue(), address.getCid(), address.getPort());
+        if (res < 0) {
+            return Errors.handleConnectErrno("connectVSock", res);
+        }
+        return true;
+    }
+
+    public VSockAddress remoteVSockAddress() {
+        byte[] addr = remoteVSockAddress(/*fd*/intValue());
+        if (addr == null) {
+            return null;
+        }
+        int cid = getIntAt(addr, 0);
+        int port = getIntAt(addr, 4);
+        return new VSockAddress(cid, port);
+    }
+
+    public VSockAddress localVSockAddress() {
+        byte[] addr = localVSockAddress(/*fd*/intValue());
+        if (addr == null) {
+            return null;
+        }
+        int cid = getIntAt(addr, 0);
+        int port = getIntAt(addr, 4);
+        return new VSockAddress(cid, port);
+    }
+
+    private static int getIntAt(byte[] array, int startIndex) {
+        return array[startIndex] << 24 | (array[startIndex + 1] & 0xFF) << 16
+                | (array[startIndex + 2] & 0xFF) << 8 | (array[startIndex + 3] & 0xFF);
+    }
+
     private static InetAddress deriveInetAddress(NetworkInterface netInterface, boolean ipv6) {
-        final InetAddress ipAny = ipv6 ? INET6_ANY : INET_ANY;
+        final InetAddress ipAny = ipv6 ? Native.INET6_ANY : Native.INET_ANY;
         if (netInterface != null) {
             final Enumeration<InetAddress> ias = netInterface.getInetAddresses();
             while (ias.hasMoreElements()) {
@@ -327,11 +381,35 @@ public final class LinuxSocket extends Socket {
         return ipAny;
     }
 
+    public static LinuxSocket newSocket(int fd) {
+        return new LinuxSocket(fd);
+    }
+
+    public static LinuxSocket newVSockStream() {
+        return new LinuxSocket(newVSockStream0());
+    }
+
+    static int newVSockStream0() {
+        int res = newVSockStreamFd();
+        if (res < 0) {
+            throw new ChannelException(newIOException("newVSockStream", res));
+        }
+        return res;
+    }
+
     public static LinuxSocket newSocketStream(boolean ipv6) {
         return new LinuxSocket(newSocketStream0(ipv6));
     }
 
+    /**
+     * @deprecated use {@link #newSocketStream(SocketProtocolFamily)}
+     */
+    @Deprecated
     public static LinuxSocket newSocketStream(InternetProtocolFamily protocol) {
+        return new LinuxSocket(newSocketStream0(protocol));
+    }
+
+    public static LinuxSocket newSocketStream(SocketProtocolFamily protocol) {
         return new LinuxSocket(newSocketStream0(protocol));
     }
 
@@ -343,7 +421,15 @@ public final class LinuxSocket extends Socket {
         return new LinuxSocket(newSocketDgram0(ipv6));
     }
 
+    /**
+     * @deprecated use {@link #newSocketDgram(SocketProtocolFamily)}
+     */
+    @Deprecated
     public static LinuxSocket newSocketDgram(InternetProtocolFamily family) {
+        return new LinuxSocket(newSocketDgram0(family));
+    }
+
+    public static LinuxSocket newSocketDgram(SocketProtocolFamily family) {
         return new LinuxSocket(newSocketDgram0(family));
     }
 
@@ -359,13 +445,11 @@ public final class LinuxSocket extends Socket {
         return new LinuxSocket(newSocketDomainDgram0());
     }
 
-    private static InetAddress unsafeInetAddrByName(String inetName) {
-        try {
-            return InetAddress.getByName(inetName);
-        } catch (UnknownHostException uhe) {
-            throw new ChannelException(uhe);
-        }
-    }
+    private static native int newVSockStreamFd();
+    private static native int bindVSock(int fd, int cid, int port);
+    private static native int connectVSock(int fd, int cid, int port);
+    private static native byte[] remoteVSockAddress(int fd);
+    private static native byte[] localVSockAddress(int fd);
 
     private static native void joinGroup(int fd, boolean ipv6, byte[] group, byte[] interfaceAddress,
                                          int scopeId, int interfaceIndex) throws IOException;
@@ -388,6 +472,8 @@ public final class LinuxSocket extends Socket {
     private static native int getTcpKeepCnt(int fd) throws IOException;
     private static native int getTcpUserTimeout(int fd) throws IOException;
     private static native int getTimeToLive(int fd) throws IOException;
+    private static native int isIpBindAddressNoPort(int fd) throws IOException;
+    private static native int isIpMulticastAll(int fd, boolean ipv6) throws IOException;
     private static native int isIpFreeBind(int fd) throws IOException;
     private static native int isIpTransparent(int fd) throws IOException;
     private static native int isIpRecvOrigDestAddr(int fd) throws IOException;
@@ -404,6 +490,8 @@ public final class LinuxSocket extends Socket {
     private static native void setTcpKeepIntvl(int fd, int seconds) throws IOException;
     private static native void setTcpKeepCnt(int fd, int probes) throws IOException;
     private static native void setTcpUserTimeout(int fd, int milliseconds)throws IOException;
+    private static native void setIpBindAddressNoPort(int fd, int ipBindAddressNoPort) throws IOException;
+    private static native void setIpMulticastAll(int fd, boolean ipv6, int enabled) throws IOException;
     private static native void setIpFreeBind(int fd, int freeBind) throws IOException;
     private static native void setIpTransparent(int fd, int transparent) throws IOException;
     private static native void setIpRecvOrigDestAddr(int fd, int transparent) throws IOException;

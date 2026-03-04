@@ -22,8 +22,6 @@
 
 package io.netty.util.internal;
 
-import static io.netty.util.internal.ObjectUtil.checkPositive;
-
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
@@ -34,6 +32,8 @@ import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
+
+import static io.netty.util.internal.ObjectUtil.checkPositive;
 
 /**
  * A random number generator isolated to the current thread.  Like the
@@ -51,7 +51,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@code ThreadLocalRandom.current().nextX(...)} (where
  * {@code X} is {@code Int}, {@code Long}, etc).
  * When all usages are of this form, it is never possible to
- * accidently share a {@code ThreadLocalRandom} across multiple threads.
+ * accidentally share a {@code ThreadLocalRandom} across multiple threads.
  *
  * <p>This class also provides additional commonly used bounded random
  * generation methods.
@@ -59,6 +59,7 @@ import java.util.concurrent.atomic.AtomicLong;
  * //since 1.7
  * //author Doug Lea
  */
+@Deprecated
 @SuppressWarnings("all")
 public final class ThreadLocalRandom extends Random {
 

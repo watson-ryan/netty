@@ -20,6 +20,7 @@ import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.local.LocalAddress;
 import io.netty.channel.local.LocalChannel;
+import io.netty.channel.local.LocalIoHandler;
 import io.netty.channel.local.LocalServerChannel;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.Future;
@@ -55,7 +56,7 @@ public class ChannelInitializerTest {
 
     @BeforeEach
     public void setUp() {
-        group = new DefaultEventLoopGroup(1);
+        group = new MultiThreadIoEventLoopGroup(1, LocalIoHandler.newFactory());
         server = new ServerBootstrap()
                 .group(group)
                 .channel(LocalServerChannel.class)
@@ -270,6 +271,7 @@ public class ChannelInitializerTest {
 
         final EventExecutor executor = new DefaultEventLoop() {
             private final ScheduledExecutorService execService = Executors.newSingleThreadScheduledExecutor();
+            private Thread thread;
 
             @Override
             public void shutdown() {
@@ -277,9 +279,15 @@ public class ChannelInitializerTest {
             }
 
             @Override
-            public boolean inEventLoop(Thread thread) {
-                // Always return false which will ensure we always call execute(...)
-                return false;
+            public synchronized boolean inEventLoop(Thread thread) {
+                // Return false every other time which will ensure we hit the execute(...) path
+                if (thread == null) {
+                    thread = Thread.currentThread();
+                    return false;
+                }
+                boolean result = thread == Thread.currentThread();
+                thread = null;
+                return result;
             }
 
             @Override

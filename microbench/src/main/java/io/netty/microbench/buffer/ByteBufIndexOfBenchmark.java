@@ -20,7 +20,6 @@ import io.netty.buffer.ByteBufAllocator;
 import io.netty.buffer.PooledByteBufAllocator;
 import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.microbench.util.AbstractMicrobenchmark;
-import io.netty.util.internal.SuppressJava6Requirement;
 import org.openjdk.jmh.annotations.Benchmark;
 import org.openjdk.jmh.annotations.Fork;
 import org.openjdk.jmh.annotations.Level;
@@ -43,13 +42,23 @@ import java.util.concurrent.TimeUnit;
 @Measurement(iterations = 8, time = 1)
 public class ByteBufIndexOfBenchmark extends AbstractMicrobenchmark {
 
-    @Param({ "7", "16", "23", "32" })
+    @Param({
+            "7",
+            "16",
+            "23",
+            "32",
+    })
     int size;
 
-    @Param({ "4", "11" })
+    @Param({
+            "4",
+            "11",
+    })
     int logPermutations;
 
-    @Param({ "1" })
+    @Param({
+            "1",
+    })
     int seed;
 
     int permutations;
@@ -57,19 +66,30 @@ public class ByteBufIndexOfBenchmark extends AbstractMicrobenchmark {
     ByteBuf[] data;
     private int i;
 
-    @Param({ "0" })
+    @Param({
+            "0",
+    })
     private byte needleByte;
 
-    @Param({ "true", "false" })
+    @Param({
+            "true",
+            "false",
+    })
     private boolean direct;
-    @Param({ "false", "true" })
+
+    @Param({
+            "true",
+            "false",
+    })
     private boolean noUnsafe;
 
-    @Param({ "false", "true" })
+    @Param({
+            "true",
+            "false",
+    })
     private boolean pooled;
 
     @Setup(Level.Trial)
-    @SuppressJava6Requirement(reason = "using SplittableRandom to reliably produce data")
     public void init() {
         System.setProperty("io.netty.noUnsafe", Boolean.valueOf(noUnsafe).toString());
         SplittableRandom random = new SplittableRandom(seed);

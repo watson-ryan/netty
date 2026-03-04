@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
 
+import io.netty.util.internal.EmptyArrays;
 import org.bouncycastle.asn1.ocsp.OCSPResponseStatus;
 import org.bouncycastle.cert.X509CertificateHolder;
 import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter;
@@ -164,20 +165,13 @@ public class OcspServerExample {
     }
 
     private static X509Certificate[] parseCertificates(Class<?> clazz, String name) throws Exception {
-        InputStream in = clazz.getResourceAsStream(name);
-        if (in == null) {
-            throw new FileNotFoundException("clazz=" + clazz + ", name=" + name);
-        }
-
-        try {
-            BufferedReader reader = new BufferedReader(new InputStreamReader(in, CharsetUtil.US_ASCII));
-            try {
-                return parseCertificates(reader);
-            } finally {
-                reader.close();
+        try (InputStream in = clazz.getResourceAsStream(name)) {
+            if (in == null) {
+                throw new FileNotFoundException("clazz=" + clazz + ", name=" + name);
             }
-        } finally {
-            in.close();
+            try (BufferedReader reader = new BufferedReader(new InputStreamReader(in, CharsetUtil.US_ASCII))) {
+                return parseCertificates(reader);
+            }
         }
     }
 
@@ -204,6 +198,6 @@ public class OcspServerExample {
             parser.close();
         }
 
-        return dst.toArray(new X509Certificate[0]);
+        return dst.toArray(EmptyArrays.EMPTY_X509_CERTIFICATES);
     }
 }

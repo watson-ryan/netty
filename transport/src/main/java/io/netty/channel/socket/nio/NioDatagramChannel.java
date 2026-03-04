@@ -30,12 +30,12 @@ import io.netty.channel.nio.AbstractNioMessageChannel;
 import io.netty.channel.socket.DatagramChannelConfig;
 import io.netty.channel.socket.DatagramPacket;
 import io.netty.channel.socket.InternetProtocolFamily;
+import io.netty.channel.socket.SocketProtocolFamily;
 import io.netty.util.UncheckedBooleanSupplier;
 import io.netty.util.internal.ObjectUtil;
-import io.netty.util.internal.SocketUtils;
 import io.netty.util.internal.PlatformDependent;
+import io.netty.util.internal.SocketUtils;
 import io.netty.util.internal.StringUtil;
-import io.netty.util.internal.SuppressJava6Requirement;
 
 import java.io.IOException;
 import java.net.InetAddress;
@@ -47,6 +47,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.DatagramChannel;
 import java.nio.channels.MembershipKey;
 import java.nio.channels.SelectionKey;
+import java.nio.channels.UnresolvedAddressException;
 import java.nio.channels.spi.SelectorProvider;
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -64,7 +65,7 @@ import java.util.Map;
 public final class NioDatagramChannel
         extends AbstractNioMessageChannel implements io.netty.channel.socket.DatagramChannel {
 
-    private static final ChannelMetadata METADATA = new ChannelMetadata(true);
+    private static final ChannelMetadata METADATA = new ChannelMetadata(true, 16);
     private static final SelectorProvider DEFAULT_SELECTOR_PROVIDER = SelectorProvider.provider();
     private static final String EXPECTED_TYPES =
             " (expected: " + StringUtil.simpleClassName(DatagramPacket.class) + ", " +
@@ -77,43 +78,34 @@ public final class NioDatagramChannel
 
     private Map<InetAddress, List<MembershipKey>> memberships;
 
+    /**
+     *  Use the {@link SelectorProvider} to open {@link DatagramChannel} and so remove condition in
+     *  {@link SelectorProvider#provider()} which is called by each DatagramChannel.open() otherwise.
+     * <p>
+     *  See <a href="https://github.com/netty/netty/issues/2308">#2308</a>.
+     */
     private static DatagramChannel newSocket(SelectorProvider provider) {
         try {
-            /**
-             *  Use the {@link SelectorProvider} to open {@link SocketChannel} and so remove condition in
-             *  {@link SelectorProvider#provider()} which is called by each DatagramChannel.open() otherwise.
-             *
-             *  See <a href="https://github.com/netty/netty/issues/2308">#2308</a>.
-             */
             return provider.openDatagramChannel();
         } catch (IOException e) {
             throw new ChannelException("Failed to open a socket.", e);
         }
     }
 
-    @SuppressJava6Requirement(reason = "Usage guarded by java version check")
-    private static DatagramChannel newSocket(SelectorProvider provider, InternetProtocolFamily ipFamily) {
+    private static DatagramChannel newSocket(SelectorProvider provider, SocketProtocolFamily ipFamily) {
         if (ipFamily == null) {
             return newSocket(provider);
         }
 
-        checkJavaVersion();
-
         try {
-            return provider.openDatagramChannel(ProtocolFamilyConverter.convert(ipFamily));
+            return provider.openDatagramChannel(ipFamily.toJdkFamily());
         } catch (IOException e) {
             throw new ChannelException("Failed to open a socket.", e);
         }
     }
 
-    private static void checkJavaVersion() {
-        if (PlatformDependent.javaVersion() < 7) {
-            throw new UnsupportedOperationException("Only supported on java 7+.");
-        }
-    }
-
     /**
-     * Create a new instance which will use the Operation Systems default {@link InternetProtocolFamily}.
+     * Create a new instance which will use the Operation Systems default {@link SocketProtocolFamily}.
      */
     public NioDatagramChannel() {
         this(newSocket(DEFAULT_SELECTOR_PROVIDER));
@@ -121,7 +113,7 @@ public final class NioDatagramChannel
 
     /**
      * Create a new instance using the given {@link SelectorProvider}
-     * which will use the Operation Systems default {@link InternetProtocolFamily}.
+     * which will use the Operation Systems default {@link SocketProtocolFamily}.
      */
     public NioDatagramChannel(SelectorProvider provider) {
         this(newSocket(provider));
@@ -130,18 +122,41 @@ public final class NioDatagramChannel
     /**
      * Create a new instance using the given {@link InternetProtocolFamily}. If {@code null} is used it will depend
      * on the Operation Systems default which will be chosen.
+     *
+     * @deprecated use {@link NioDatagramChannel#NioDatagramChannel(SocketProtocolFamily)}
      */
+    @Deprecated
     public NioDatagramChannel(InternetProtocolFamily ipFamily) {
-        this(newSocket(DEFAULT_SELECTOR_PROVIDER, ipFamily));
+        this(ipFamily == null ? null : ipFamily.toSocketProtocolFamily());
+    }
+
+    /**
+     * Create a new instance using the given {@link SocketProtocolFamily}. If {@code null} is used it will depend
+     * on the Operation Systems default which will be chosen.
+     */
+    public NioDatagramChannel(SocketProtocolFamily protocolFamily) {
+        this(newSocket(DEFAULT_SELECTOR_PROVIDER, protocolFamily));
     }
 
     /**
      * Create a new instance using the given {@link SelectorProvider} and {@link InternetProtocolFamily}.
      * If {@link InternetProtocolFamily} is {@code null} it will depend on the Operation Systems default
      * which will be chosen.
+     *
+     * @deprecated use {@link NioDatagramChannel#NioDatagramChannel(SelectorProvider, SocketProtocolFamily)}
      */
+    @Deprecated
     public NioDatagramChannel(SelectorProvider provider, InternetProtocolFamily ipFamily) {
-        this(newSocket(provider, ipFamily));
+        this(provider, ipFamily == null ? null : ipFamily.toSocketProtocolFamily());
+    }
+
+    /**
+     * Create a new instance using the given {@link SelectorProvider} and {@link SocketProtocolFamily}.
+     * If {@link SocketProtocolFamily} is {@code null} it will depend on the Operation Systems default
+     * which will be chosen.
+     */
+    public NioDatagramChannel(SelectorProvider provider, SocketProtocolFamily protocolFamily) {
+        this(newSocket(provider, protocolFamily));
     }
 
     /**
@@ -197,11 +212,7 @@ public final class NioDatagramChannel
     }
 
     private void doBind0(SocketAddress localAddress) throws Exception {
-        if (PlatformDependent.javaVersion() >= 7) {
-            SocketUtils.bind(javaChannel(), localAddress);
-        } else {
-            javaChannel().socket().bind(localAddress);
-        }
+        SocketUtils.bind(javaChannel(), localAddress);
     }
 
     @Override
@@ -225,7 +236,7 @@ public final class NioDatagramChannel
 
     @Override
     protected void doFinishConnect() throws Exception {
-        throw new Error();
+        throw new UnsupportedOperationException("finishConnect is not supported for " + getClass().getName());
     }
 
     @Override
@@ -300,10 +311,18 @@ public final class NioDatagramChannel
         return writtenBytes > 0;
     }
 
+    private static void checkUnresolved(AddressedEnvelope<?, ?> envelope) {
+        if (envelope.recipient() instanceof InetSocketAddress
+                && (((InetSocketAddress) envelope.recipient()).isUnresolved())) {
+            throw new UnresolvedAddressException();
+        }
+    }
+
     @Override
     protected Object filterOutboundMessage(Object msg) {
         if (msg instanceof DatagramPacket) {
             DatagramPacket p = (DatagramPacket) msg;
+            checkUnresolved(p);
             ByteBuf content = p.content();
             if (isSingleDirectBuffer(content)) {
                 return p;
@@ -322,6 +341,7 @@ public final class NioDatagramChannel
         if (msg instanceof AddressedEnvelope) {
             @SuppressWarnings("unchecked")
             AddressedEnvelope<Object, SocketAddress> e = (AddressedEnvelope<Object, SocketAddress>) msg;
+            checkUnresolved(e);
             if (e.content() instanceof ByteBuf) {
                 ByteBuf content = (ByteBuf) e.content();
                 if (isSingleDirectBuffer(content)) {
@@ -400,13 +420,10 @@ public final class NioDatagramChannel
         return joinGroup(multicastAddress, networkInterface, source, newPromise());
     }
 
-    @SuppressJava6Requirement(reason = "Usage guarded by java version check")
     @Override
     public ChannelFuture joinGroup(
             InetAddress multicastAddress, NetworkInterface networkInterface,
             InetAddress source, ChannelPromise promise) {
-
-        checkJavaVersion();
 
         ObjectUtil.checkNotNull(multicastAddress, "multicastAddress");
         ObjectUtil.checkNotNull(networkInterface, "networkInterface");
@@ -476,12 +493,10 @@ public final class NioDatagramChannel
         return leaveGroup(multicastAddress, networkInterface, source, newPromise());
     }
 
-    @SuppressJava6Requirement(reason = "Usage guarded by java version check")
     @Override
     public ChannelFuture leaveGroup(
             InetAddress multicastAddress, NetworkInterface networkInterface, InetAddress source,
             ChannelPromise promise) {
-        checkJavaVersion();
 
         ObjectUtil.checkNotNull(multicastAddress, "multicastAddress");
         ObjectUtil.checkNotNull(networkInterface, "networkInterface");
@@ -526,12 +541,10 @@ public final class NioDatagramChannel
     /**
      * Block the given sourceToBlock address for the given multicastAddress on the given networkInterface
      */
-    @SuppressJava6Requirement(reason = "Usage guarded by java version check")
     @Override
     public ChannelFuture block(
             InetAddress multicastAddress, NetworkInterface networkInterface,
             InetAddress sourceToBlock, ChannelPromise promise) {
-        checkJavaVersion();
 
         ObjectUtil.checkNotNull(multicastAddress, "multicastAddress");
         ObjectUtil.checkNotNull(sourceToBlock, "sourceToBlock");
@@ -545,7 +558,7 @@ public final class NioDatagramChannel
                         try {
                             key.block(sourceToBlock);
                         } catch (IOException e) {
-                            promise.setFailure(e);
+                            return promise.setFailure(e);
                         }
                     }
                 }

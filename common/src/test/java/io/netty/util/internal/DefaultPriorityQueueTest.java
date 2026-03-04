@@ -20,10 +20,10 @@ import org.junit.jupiter.api.Test;
 import java.io.Serializable;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.Comparator;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.ThreadLocalRandom;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -148,8 +148,38 @@ public class DefaultPriorityQueueTest {
         testRemoval(true);
     }
 
+    @Test
+    public void testRemovalFuzz() {
+        ThreadLocalRandom threadLocalRandom = ThreadLocalRandom.current();
+        final int numElements = threadLocalRandom.nextInt(0, 30);
+        final TestElement[] values = new TestElement[numElements];
+        PriorityQueue<TestElement> queue =
+                new DefaultPriorityQueue<>(TestElementComparator.INSTANCE, values.length);
+        for (int i = 0; i < values.length; ++i) {
+            do {
+                values[i] = new TestElement(threadLocalRandom.nextInt(0, numElements * 2));
+            } while (!queue.add(values[i]));
+        }
+
+        for (int i = 0; i < values.length; ++i) {
+            try {
+                assertTrue(queue.removeTyped(values[i]));
+                assertEquals(queue.size(), values.length - (i + 1));
+            } catch (Throwable cause) {
+                StringBuilder sb = new StringBuilder(values.length * 2);
+                sb.append("error on removal of index: ").append(i).append(" [");
+                for (TestElement value : values) {
+                    sb.append(value).append(" ");
+                }
+                sb.append("]");
+                throw new AssertionError(sb.toString(), cause);
+            }
+        }
+        assertEmptyQueue(queue);
+    }
+
     private static void testRemoval(boolean typed) {
-        PriorityQueue<TestElement> queue = new DefaultPriorityQueue<TestElement>(TestElementComparator.INSTANCE, 4);
+        PriorityQueue<TestElement> queue = new DefaultPriorityQueue<>(TestElementComparator.INSTANCE, 4);
         assertEmptyQueue(queue);
 
         TestElement a = new TestElement(5);
@@ -179,26 +209,26 @@ public class DefaultPriorityQueueTest {
         assertEquals(4, queue.size());
 
         // Repeat remove the last element in the array, when the array is non-empty.
-        assertTrue(typed ? queue.removeTyped(b) : queue.remove(b));
+        assertTrue(typed ? queue.removeTyped(d) : queue.remove(d));
         assertSame(c, queue.peek());
         assertEquals(3, queue.size());
+
+        assertTrue(typed ? queue.removeTyped(b) : queue.remove(b));
+        assertSame(c, queue.peek());
+        assertEquals(2, queue.size());
 
         // Remove the head of the queue.
         assertTrue(typed ? queue.removeTyped(c) : queue.remove(c));
         assertSame(a, queue.peek());
-        assertEquals(2, queue.size());
-
-        assertTrue(typed ? queue.removeTyped(a) : queue.remove(a));
-        assertSame(d, queue.peek());
         assertEquals(1, queue.size());
 
-        assertTrue(typed ? queue.removeTyped(d) : queue.remove(d));
+        assertTrue(typed ? queue.removeTyped(a) : queue.remove(a));
         assertEmptyQueue(queue);
     }
 
     @Test
     public void testZeroInitialSize() {
-        PriorityQueue<TestElement> queue = new DefaultPriorityQueue<TestElement>(TestElementComparator.INSTANCE, 0);
+        PriorityQueue<TestElement> queue = new DefaultPriorityQueue<>(TestElementComparator.INSTANCE, 0);
         assertEmptyQueue(queue);
         TestElement e = new TestElement(1);
         assertOffer(queue, e);
@@ -211,7 +241,7 @@ public class DefaultPriorityQueueTest {
 
     @Test
     public void testPriorityChange() {
-        PriorityQueue<TestElement> queue = new DefaultPriorityQueue<TestElement>(TestElementComparator.INSTANCE, 0);
+        PriorityQueue<TestElement> queue = new DefaultPriorityQueue<>(TestElementComparator.INSTANCE, 0);
         assertEmptyQueue(queue);
         TestElement a = new TestElement(10);
         TestElement b = new TestElement(20);
@@ -241,9 +271,9 @@ public class DefaultPriorityQueueTest {
         f.value = 5;
         queue.priorityChanged(f);
 
-        List<TestElement> expectedOrderList = new ArrayList<TestElement>(queue.size());
+        List<TestElement> expectedOrderList = new ArrayList<>(queue.size());
         expectedOrderList.addAll(Arrays.asList(a, b, c, d, e, f));
-        Collections.sort(expectedOrderList, TestElementComparator.INSTANCE);
+        expectedOrderList.sort(TestElementComparator.INSTANCE);
 
         assertEquals(expectedOrderList.size(), queue.size());
         assertEquals(expectedOrderList.isEmpty(), queue.isEmpty());

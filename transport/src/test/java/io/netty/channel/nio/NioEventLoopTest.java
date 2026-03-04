@@ -17,21 +17,22 @@ package io.netty.channel.nio;
 
 import io.netty.channel.AbstractEventLoopTest;
 import io.netty.channel.Channel;
-import io.netty.channel.DefaultSelectStrategyFactory;
 import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.EventLoopTaskQueueFactory;
+import io.netty.channel.IoEventLoop;
+import io.netty.channel.IoEventLoopGroup;
+import io.netty.channel.IoRegistration;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.SelectStrategy;
 import io.netty.channel.SelectStrategyFactory;
 import io.netty.channel.SingleThreadEventLoop;
+import io.netty.channel.SingleThreadIoEventLoop;
 import io.netty.channel.socket.ServerSocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
+import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.util.IntSupplier;
-import io.netty.util.concurrent.DefaultEventExecutorChooserFactory;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.RejectedExecutionHandlers;
-import io.netty.util.concurrent.ThreadPerTaskExecutor;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -41,19 +42,15 @@ import java.nio.channels.SelectionKey;
 import java.nio.channels.Selector;
 import java.nio.channels.SocketChannel;
 import java.nio.channels.spi.SelectorProvider;
-import java.util.Queue;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.instanceOf;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -62,12 +59,17 @@ public class NioEventLoopTest extends AbstractEventLoopTest {
 
     @Override
     protected EventLoopGroup newEventLoopGroup() {
-        return new NioEventLoopGroup();
+        return new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
     }
 
     @Override
     protected Class<? extends ServerSocketChannel> newChannel() {
         return NioServerSocketChannel.class;
+    }
+
+    @Override
+    protected Class<? extends io.netty.channel.socket.SocketChannel> newSocketChannel() {
+        return NioSocketChannel.class;
     }
 
     @Test
@@ -103,7 +105,7 @@ public class NioEventLoopTest extends AbstractEventLoopTest {
 
     @Test
     public void testScheduleBigDelayNotOverflow() {
-        EventLoopGroup group = new NioEventLoopGroup(1);
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
 
         final EventLoop el = group.next();
         Future<?> future = el.schedule(new Runnable() {
@@ -164,8 +166,8 @@ public class NioEventLoopTest extends AbstractEventLoopTest {
     @Test
     @Timeout(value = 3000, unit = TimeUnit.MILLISECONDS)
     public void testSelectableChannel() throws Exception {
-        NioEventLoopGroup group = new NioEventLoopGroup(1);
-        NioEventLoop loop = (NioEventLoop) group.next();
+        IoEventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
+        IoEventLoop loop = group.next();
 
         try {
             Channel channel = new NioServerSocketChannel();
@@ -178,16 +180,15 @@ public class NioEventLoopTest extends AbstractEventLoopTest {
 
             final CountDownLatch latch = new CountDownLatch(1);
 
-            loop.register(selectableChannel, SelectionKey.OP_CONNECT, new NioTask<SocketChannel>() {
+            IoRegistration registration = loop.register(
+                            new NioSelectableChannelIoHandle<SocketChannel>(selectableChannel) {
                 @Override
-                public void channelReady(SocketChannel ch, SelectionKey key) {
+                protected void handle(SocketChannel channel, SelectionKey key) {
                     latch.countDown();
                 }
+            }).get();
 
-                @Override
-                public void channelUnregistered(SocketChannel ch, Throwable cause) {
-                }
-            });
+            registration.submit(NioIoOps.valueOf(SelectionKey.OP_CONNECT));
 
             latch.await();
 
@@ -210,8 +211,8 @@ public class NioEventLoopTest extends AbstractEventLoopTest {
         };
         // Just run often enough to trigger it normally.
         for (int i = 0; i < 1000; i++) {
-            NioEventLoopGroup group = new NioEventLoopGroup(1);
-            final NioEventLoop loop = (NioEventLoop) group.next();
+            EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, NioIoHandler.newFactory());
+            final EventLoop loop = group.next();
 
             Thread t = new Thread(new Runnable() {
                 @Override
@@ -229,7 +230,7 @@ public class NioEventLoopTest extends AbstractEventLoopTest {
             group.shutdownNow();
             t.join();
             group.terminationFuture().syncUninterruptibly();
-            assertThat(error.get(), instanceOf(RejectedExecutionException.class));
+            assertInstanceOf(RejectedExecutionException.class, error.get());
             error.set(null);
         }
     }
@@ -278,10 +279,9 @@ public class NioEventLoopTest extends AbstractEventLoopTest {
     @Test
     @Timeout(value = 3000, unit = TimeUnit.MILLISECONDS)
     public void testChannelsRegistered() throws Exception {
-        NioEventLoopGroup group = new NioEventLoopGroup(1);
-        final NioEventLoop loop = (NioEventLoop) group.next();
-
+        EventLoopGroup group = new NioEventLoopGroup(1);
         try {
+            final SingleThreadIoEventLoop loop = (SingleThreadIoEventLoop) group.next();
             final Channel ch1 = new NioServerSocketChannel();
             final Channel ch2 = new NioServerSocketChannel();
 
@@ -314,35 +314,4 @@ public class NioEventLoopTest extends AbstractEventLoopTest {
             }
         }).get(1, TimeUnit.SECONDS);
     }
-
-    @Test
-    public void testCustomQueue()  {
-        final AtomicBoolean called = new AtomicBoolean();
-        NioEventLoopGroup group = new NioEventLoopGroup(1,
-                new ThreadPerTaskExecutor(new DefaultThreadFactory(NioEventLoopGroup.class)),
-                DefaultEventExecutorChooserFactory.INSTANCE, SelectorProvider.provider(),
-                DefaultSelectStrategyFactory.INSTANCE, RejectedExecutionHandlers.reject(),
-                new EventLoopTaskQueueFactory() {
-                    @Override
-                    public Queue<Runnable> newTaskQueue(int maxCapacity) {
-                        called.set(true);
-                        return new LinkedBlockingQueue<Runnable>(maxCapacity);
-                    }
-        });
-
-        final NioEventLoop loop = (NioEventLoop) group.next();
-
-        try {
-            loop.submit(new Runnable() {
-                @Override
-                public void run() {
-                    // NOOP.
-                }
-            }).syncUninterruptibly();
-            assertTrue(called.get());
-        } finally {
-            group.shutdownGracefully();
-        }
-    }
-
 }

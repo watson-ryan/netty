@@ -30,7 +30,6 @@ import java.net.SocketAddress;
 
 import static io.netty.channel.kqueue.BsdSocket.newSocketDomain;
 
-@UnstableApi
 public final class KQueueDomainSocketChannel extends AbstractKQueueStreamChannel implements DomainSocketChannel {
     private final KQueueDomainSocketChannelConfig config = new KQueueDomainSocketChannelConfig(this);
 
@@ -47,6 +46,8 @@ public final class KQueueDomainSocketChannel extends AbstractKQueueStreamChannel
 
     KQueueDomainSocketChannel(Channel parent, BsdSocket fd) {
         super(parent, fd, true);
+        local = fd.localDomainSocketAddress();
+        remote = fd.remoteDomainSocketAddress();
     }
 
     @Override
@@ -78,7 +79,7 @@ public final class KQueueDomainSocketChannel extends AbstractKQueueStreamChannel
     @Override
     protected boolean doConnect(SocketAddress remoteAddress, SocketAddress localAddress) throws Exception {
         if (super.doConnect(remoteAddress, localAddress)) {
-            local = (DomainSocketAddress) localAddress;
+            local = localAddress != null ? (DomainSocketAddress) localAddress : socket.localDomainSocketAddress();
             remote = (DomainSocketAddress) remoteAddress;
             return true;
         }
@@ -134,7 +135,7 @@ public final class KQueueDomainSocketChannel extends AbstractKQueueStreamChannel
                     readReadyFd();
                     break;
                 default:
-                    throw new Error();
+                    throw new Error("Unexpected read mode: " + config().getReadMode());
             }
         }
 
@@ -148,7 +149,6 @@ public final class KQueueDomainSocketChannel extends AbstractKQueueStreamChannel
 
             final ChannelPipeline pipeline = pipeline();
             allocHandle.reset(config);
-            readReadyBefore();
 
             try {
                 readLoop: do {
@@ -180,7 +180,9 @@ public final class KQueueDomainSocketChannel extends AbstractKQueueStreamChannel
                 pipeline.fireChannelReadComplete();
                 pipeline.fireExceptionCaught(t);
             } finally {
-                readReadyFinally(config);
+                if (shouldStopReading(config)) {
+                    clearReadFilter0();
+                }
             }
         }
     }

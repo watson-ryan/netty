@@ -19,13 +19,12 @@ import io.netty.channel.ChannelException;
 import io.netty.channel.ChannelMetadata;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelOutboundBuffer;
-import io.netty.channel.socket.InternetProtocolFamily;
-import io.netty.util.internal.SocketUtils;
 import io.netty.channel.nio.AbstractNioMessageChannel;
 import io.netty.channel.socket.DefaultServerSocketChannelConfig;
+import io.netty.channel.socket.InternetProtocolFamily;
 import io.netty.channel.socket.ServerSocketChannelConfig;
-import io.netty.util.internal.PlatformDependent;
-import io.netty.util.internal.SuppressJava6Requirement;
+import io.netty.channel.socket.SocketProtocolFamily;
+import io.netty.util.internal.SocketUtils;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 
@@ -56,7 +55,7 @@ public class NioServerSocketChannel extends AbstractNioMessageChannel
     private static final Method OPEN_SERVER_SOCKET_CHANNEL_WITH_FAMILY =
             SelectorProviderUtil.findOpenMethod("openServerSocketChannel");
 
-    private static ServerSocketChannel newChannel(SelectorProvider provider, InternetProtocolFamily family) {
+    private static ServerSocketChannel newChannel(SelectorProvider provider, SocketProtocolFamily family) {
         try {
             ServerSocketChannel channel =
                     SelectorProviderUtil.newChannel(OPEN_SERVER_SOCKET_CHANNEL_WITH_FAMILY, provider, family);
@@ -79,13 +78,23 @@ public class NioServerSocketChannel extends AbstractNioMessageChannel
      * Create a new instance using the given {@link SelectorProvider}.
      */
     public NioServerSocketChannel(SelectorProvider provider) {
-        this(provider, null);
+        this(provider, (SocketProtocolFamily) null);
+    }
+
+    /**
+     * Create a new instance using the given {@link SelectorProvider} and protocol family (supported only since JDK 15).
+     *
+     * @deprecated use {@link NioServerSocketChannel#NioServerSocketChannel(SelectorProvider, SocketProtocolFamily)}
+     */
+    @Deprecated
+    public NioServerSocketChannel(SelectorProvider provider, InternetProtocolFamily family) {
+        this(provider, family == null ? null : family.toSocketProtocolFamily());
     }
 
     /**
      * Create a new instance using the given {@link SelectorProvider} and protocol family (supported only since JDK 15).
      */
-    public NioServerSocketChannel(SelectorProvider provider, InternetProtocolFamily family) {
+    public NioServerSocketChannel(SelectorProvider provider, SocketProtocolFamily family) {
         this(newChannel(provider, family));
     }
 
@@ -134,14 +143,9 @@ public class NioServerSocketChannel extends AbstractNioMessageChannel
         return SocketUtils.localSocketAddress(javaChannel().socket());
     }
 
-    @SuppressJava6Requirement(reason = "Usage guarded by java version check")
     @Override
     protected void doBind(SocketAddress localAddress) throws Exception {
-        if (PlatformDependent.javaVersion() >= 7) {
-            javaChannel().bind(localAddress, config.getBacklog());
-        } else {
-            javaChannel().socket().bind(localAddress, config.getBacklog());
-        }
+        javaChannel().bind(localAddress, config.getBacklog());
     }
 
     @Override
@@ -215,7 +219,7 @@ public class NioServerSocketChannel extends AbstractNioMessageChannel
 
         @Override
         public <T> boolean setOption(ChannelOption<T> option, T value) {
-            if (PlatformDependent.javaVersion() >= 7 && option instanceof NioChannelOption) {
+            if (option instanceof NioChannelOption) {
                 return NioChannelOption.setOption(jdkChannel(), (NioChannelOption<T>) option, value);
             }
             return super.setOption(option, value);
@@ -223,7 +227,7 @@ public class NioServerSocketChannel extends AbstractNioMessageChannel
 
         @Override
         public <T> T getOption(ChannelOption<T> option) {
-            if (PlatformDependent.javaVersion() >= 7 && option instanceof NioChannelOption) {
+            if (option instanceof NioChannelOption) {
                 return NioChannelOption.getOption(jdkChannel(), (NioChannelOption<T>) option);
             }
             return super.getOption(option);
@@ -231,10 +235,7 @@ public class NioServerSocketChannel extends AbstractNioMessageChannel
 
         @Override
         public Map<ChannelOption<?>, Object> getOptions() {
-            if (PlatformDependent.javaVersion() >= 7) {
-                return getOptions(super.getOptions(), NioChannelOption.getOptions(jdkChannel()));
-            }
-            return super.getOptions();
+            return getOptions(super.getOptions(), NioChannelOption.getOptions(jdkChannel()));
         }
 
         private ServerSocketChannel jdkChannel() {
@@ -242,7 +243,7 @@ public class NioServerSocketChannel extends AbstractNioMessageChannel
         }
     }
 
-    // Override just to to be able to call directly via unit tests.
+    // Override just to be able to call directly via unit tests.
     @Override
     protected boolean closeOnReadError(Throwable cause) {
         return super.closeOnReadError(cause);

@@ -16,11 +16,11 @@
 
 package io.netty.test.udt.nio;
 
-import com.yammer.metrics.Metrics;
-import com.yammer.metrics.core.Meter;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.ChannelFuture;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.EventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.udt.nio.NioUdtByteRendezvousChannel;
 import io.netty.channel.udt.nio.NioUdtProvider;
 import io.netty.test.udt.util.EchoByteHandler;
@@ -60,24 +60,16 @@ public class NioUdtByteRendezvousChannelTest extends AbstractUdtTest {
         final int messageSize = 64 * 1024;
         final int transferLimit = messageSize * 16;
 
-        final Meter rate1 = Metrics.newMeter(
-                NioUdtMessageRendezvousChannelTest.class, "send rate", "bytes",
-                TimeUnit.SECONDS);
-
-        final Meter rate2 = Metrics.newMeter(
-                NioUdtMessageRendezvousChannelTest.class, "send rate", "bytes",
-                TimeUnit.SECONDS);
-
         final InetSocketAddress addr1 = UnitHelp.localSocketAddress();
         final InetSocketAddress addr2 = UnitHelp.localSocketAddress();
 
-        final EchoByteHandler handler1 = new EchoByteHandler(rate1, messageSize);
-        final EchoByteHandler handler2 = new EchoByteHandler(rate2, messageSize);
+        final EchoByteHandler handler1 = new EchoByteHandler(messageSize);
+        final EchoByteHandler handler2 = new EchoByteHandler(messageSize);
 
-        final NioEventLoopGroup group1 = new NioEventLoopGroup(
-                1, Executors.defaultThreadFactory(), NioUdtProvider.BYTE_PROVIDER);
-        final NioEventLoopGroup group2 = new NioEventLoopGroup(
-                1, Executors.defaultThreadFactory(), NioUdtProvider.BYTE_PROVIDER);
+        final EventLoopGroup group1 = new MultiThreadIoEventLoopGroup(
+                1, Executors.defaultThreadFactory(), NioIoHandler.newFactory(NioUdtProvider.BYTE_PROVIDER));
+        final EventLoopGroup group2 = new MultiThreadIoEventLoopGroup(
+                1, Executors.defaultThreadFactory(), NioIoHandler.newFactory(NioUdtProvider.BYTE_PROVIDER));
 
         final Bootstrap boot1 = new Bootstrap();
         boot1.group(group1)
@@ -96,11 +88,11 @@ public class NioUdtByteRendezvousChannelTest extends AbstractUdtTest {
         final ChannelFuture connectFuture1 = boot1.connect();
         final ChannelFuture connectFuture2 = boot2.connect();
 
-        while (handler1.meter().count() < transferLimit
-                && handler2.meter().count() < transferLimit) {
+        while (handler1.counter() < transferLimit
+                && handler2.counter() < transferLimit) {
 
-            log.info("progress : {} {}", handler1.meter().count(), handler2
-                    .meter().count());
+            log.info("progress : {} {}", handler1.counter(), handler2
+                    .counter());
 
             Thread.sleep(1000);
         }
@@ -108,13 +100,13 @@ public class NioUdtByteRendezvousChannelTest extends AbstractUdtTest {
         connectFuture1.channel().close().sync();
         connectFuture2.channel().close().sync();
 
-        log.info("handler1 : {}", handler1.meter().count());
-        log.info("handler2 : {}", handler2.meter().count());
+        log.info("handler1 : {}", handler1.counter());
+        log.info("handler2 : {}", handler2.counter());
 
-        assertTrue(handler1.meter().count() >= transferLimit);
-        assertTrue(handler2.meter().count() >= transferLimit);
+        assertTrue(handler1.counter() >= transferLimit);
+        assertTrue(handler2.counter() >= transferLimit);
 
-        assertEquals(handler1.meter().count(), handler2.meter().count());
+        assertEquals(handler1.counter(), handler2.counter());
 
         group1.shutdownGracefully();
         group2.shutdownGracefully();

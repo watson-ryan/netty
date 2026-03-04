@@ -19,7 +19,8 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.mqtt.MqttDecoder;
@@ -39,13 +40,14 @@ public final class MqttHeartBeatClient {
     private static final String PASSWORD = System.getProperty("password", "guest");
 
     public static void main(String[] args) throws Exception {
-        EventLoopGroup workerGroup = new NioEventLoopGroup();
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
 
         try {
             Bootstrap b = new Bootstrap();
-            b.group(workerGroup);
+            b.group(group);
             b.channel(NioSocketChannel.class);
             b.handler(new ChannelInitializer<SocketChannel>() {
+                @Override
                 protected void initChannel(SocketChannel ch) throws Exception {
                     ch.pipeline().addLast("encoder", MqttEncoder.INSTANCE);
                     ch.pipeline().addLast("decoder", new MqttDecoder());
@@ -58,7 +60,7 @@ public final class MqttHeartBeatClient {
             System.out.println("Client connected");
             f.channel().closeFuture().sync();
         } finally {
-            workerGroup.shutdownGracefully();
+            group.shutdownGracefully();
         }
     }
 }

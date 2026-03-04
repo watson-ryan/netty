@@ -15,12 +15,13 @@
  */
 package io.netty.util.concurrent;
 
-import io.netty.util.internal.UnstableApi;
+import io.netty.util.concurrent.AutoScalingEventExecutorChooserFactory.AutoScalingUtilizationMetric;
+
+import java.util.List;
 
 /**
  * Factory that creates new {@link EventExecutorChooser}s.
  */
-@UnstableApi
 public interface EventExecutorChooserFactory {
 
     /**
@@ -31,12 +32,31 @@ public interface EventExecutorChooserFactory {
     /**
      * Chooses the next {@link EventExecutor} to use.
      */
-    @UnstableApi
     interface EventExecutorChooser {
 
         /**
          * Returns the new {@link EventExecutor} to use.
          */
         EventExecutor next();
+    }
+
+    /**
+     * An {@link EventExecutorChooser} that exposes metrics for observation.
+     */
+    interface ObservableEventExecutorChooser extends EventExecutorChooser {
+
+        /**
+         * Returns the current number of active {@link EventExecutor}s.
+         * @return the number of active executors.
+         */
+        int activeExecutorCount();
+
+        /**
+         * Returns a list containing the last calculated utilization for each
+         * {@link EventExecutor} in the group.
+         *
+         * @return an umodifiable view of the executor utilizations.
+         */
+        List<AutoScalingUtilizationMetric> executorUtilizations();
     }
 }

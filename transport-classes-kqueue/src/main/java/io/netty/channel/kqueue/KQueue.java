@@ -18,12 +18,12 @@ package io.netty.channel.kqueue;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.unix.FileDescriptor;
 import io.netty.util.internal.SystemPropertyUtil;
-import io.netty.util.internal.UnstableApi;
+import io.netty.util.internal.logging.InternalLogger;
+import io.netty.util.internal.logging.InternalLoggerFactory;
 
 /**
  * If KQueue is available the JNI resources will be loaded when this class loads.
  */
-@UnstableApi
 public final class KQueue {
     private static final Throwable UNAVAILABILITY_CAUSE;
 
@@ -48,7 +48,14 @@ public final class KQueue {
                 }
             }
         }
-
+        if (cause != null) {
+            InternalLogger logger = InternalLoggerFactory.getInstance(KQueue.class);
+            if (logger.isTraceEnabled()) {
+                logger.debug("KQueue support is not available", cause);
+            } else if (logger.isDebugEnabled()) {
+                logger.debug("KQueue support is not available: {}", cause.getMessage());
+            }
+        }
         UNAVAILABILITY_CAUSE = cause;
     }
 

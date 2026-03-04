@@ -20,7 +20,6 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.socket.DatagramPacket;
 import io.netty.handler.codec.CorruptedFrameException;
 import io.netty.handler.codec.MessageToMessageDecoder;
-import io.netty.util.internal.UnstableApi;
 
 import java.net.InetSocketAddress;
 import java.util.List;
@@ -28,7 +27,6 @@ import java.util.List;
 /**
  * Decodes a {@link DatagramPacket} into a {@link DatagramDnsResponse}.
  */
-@UnstableApi
 @ChannelHandler.Sharable
 public class DatagramDnsResponseDecoder extends MessageToMessageDecoder<DatagramPacket> {
 
@@ -45,6 +43,7 @@ public class DatagramDnsResponseDecoder extends MessageToMessageDecoder<Datagram
      * Creates a new decoder with the specified {@code recordDecoder}.
      */
     public DatagramDnsResponseDecoder(DnsRecordDecoder recordDecoder) {
+        super(DatagramPacket.class);
         this.responseDecoder = new DnsResponseDecoder<InetSocketAddress>(recordDecoder) {
             @Override
             protected DnsResponse newResponse(InetSocketAddress sender, InetSocketAddress recipient,

@@ -16,19 +16,19 @@
 
 package io.netty.handler.ssl;
 
-import java.io.ByteArrayOutputStream;
-import java.io.File;
-import java.io.FileInputStream;
+import java.nio.file.Files;
 import java.security.PrivateKey;
 
 import io.netty.buffer.UnpooledByteBufAllocator;
 
+import io.netty.handler.ssl.util.CachedSelfSignedCertificate;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeFalse;
@@ -48,15 +48,9 @@ public class PemEncodedTest {
     private static void testPemEncoded(SslProvider provider) throws Exception {
         OpenSsl.ensureAvailability();
         assumeFalse(OpenSsl.useKeyManagerFactory());
-        PemPrivateKey pemKey;
-        PemX509Certificate pemCert;
-        SelfSignedCertificate ssc = new SelfSignedCertificate();
-        try {
-            pemKey = PemPrivateKey.valueOf(toByteArray(ssc.privateKey()));
-            pemCert = PemX509Certificate.valueOf(toByteArray(ssc.certificate()));
-        } finally {
-            ssc.delete();
-        }
+        SelfSignedCertificate ssc = CachedSelfSignedCertificate.getCachedCertificate();
+        PemPrivateKey pemKey = PemPrivateKey.valueOf(Files.readAllBytes(ssc.privateKey().toPath()));
+        PemX509Certificate pemCert = PemX509Certificate.valueOf(Files.readAllBytes(ssc.certificate().toPath()));
 
         SslContext context = SslContextBuilder.forServer(pemKey, pemCert)
                 .sslProvider(provider)
@@ -64,7 +58,7 @@ public class PemEncodedTest {
         assertEquals(1, pemKey.refCnt());
         assertEquals(1, pemCert.refCnt());
         try {
-            assertTrue(context instanceof ReferenceCountedOpenSslContext);
+            assertInstanceOf(ReferenceCountedOpenSslContext.class, context);
         } finally {
             ReferenceCountUtil.release(context);
             assertRelease(pemKey);
@@ -101,23 +95,4 @@ public class PemEncodedTest {
         assertTrue(encoded.release());
     }
 
-    private static byte[] toByteArray(File file) throws Exception {
-        FileInputStream in = new FileInputStream(file);
-        try {
-            ByteArrayOutputStream baos = new ByteArrayOutputStream();
-            try {
-                byte[] buf = new byte[1024];
-                int len;
-                while ((len = in.read(buf)) != -1) {
-                    baos.write(buf, 0, len);
-                }
-            } finally {
-                baos.close();
-            }
-
-            return baos.toByteArray();
-        } finally {
-            in.close();
-        }
-    }
 }

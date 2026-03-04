@@ -19,12 +19,15 @@ import io.netty.util.AsciiString;
 import io.netty.util.ByteProcessor;
 import io.netty.util.CharsetUtil;
 import io.netty.util.IllegalReferenceCountException;
+import io.netty.util.Recycler;
+import io.netty.util.Recycler.EnhancedHandle;
+import io.netty.util.ResourceLeakDetector;
 import io.netty.util.concurrent.FastThreadLocal;
+import io.netty.util.concurrent.FastThreadLocalThread;
 import io.netty.util.internal.MathUtil;
-import io.netty.util.internal.ObjectPool;
 import io.netty.util.internal.ObjectPool.Handle;
-import io.netty.util.internal.ObjectPool.ObjectCreator;
 import io.netty.util.internal.PlatformDependent;
+import io.netty.util.internal.SWARUtil;
 import io.netty.util.internal.StringUtil;
 import io.netty.util.internal.SystemPropertyUtil;
 import io.netty.util.internal.logging.InternalLogger;
@@ -42,7 +45,6 @@ import java.nio.charset.CharsetEncoder;
 import java.nio.charset.CoderResult;
 import java.nio.charset.CodingErrorAction;
 import java.util.Arrays;
-import java.util.Locale;
 
 import static io.netty.util.internal.MathUtil.isOutOfBounds;
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
@@ -72,11 +74,11 @@ public final class ByteBufUtil {
 
     static final int WRITE_CHUNK_SIZE = 8192;
     static final ByteBufAllocator DEFAULT_ALLOCATOR;
+    private static final boolean SWAR_UNALIGNED = PlatformDependent.canUnalignedAccess();
 
     static {
         String allocType = SystemPropertyUtil.get(
-                "io.netty.allocator.type", PlatformDependent.isAndroid() ? "unpooled" : "pooled");
-        allocType = allocType.toLowerCase(Locale.US).trim();
+                "io.netty.allocator.type", "adaptive");
 
         ByteBufAllocator alloc;
         if ("unpooled".equals(allocType)) {
@@ -84,6 +86,9 @@ public final class ByteBufUtil {
             logger.debug("-Dio.netty.allocator.type: {}", allocType);
         } else if ("pooled".equals(allocType)) {
             alloc = PooledByteBufAllocator.DEFAULT;
+            logger.debug("-Dio.netty.allocator.type: {}", allocType);
+        } else if ("adaptive".equals(allocType)) {
+            alloc = new AdaptiveByteBufAllocator();
             logger.debug("-Dio.netty.allocator.type: {}", allocType);
         } else {
             alloc = PooledByteBufAllocator.DEFAULT;
@@ -105,8 +110,13 @@ public final class ByteBufUtil {
      * Allocates a new array if minLength > {@link ByteBufUtil#MAX_TL_ARRAY_LEN}
      */
     static byte[] threadLocalTempArray(int minLength) {
-        return minLength <= MAX_TL_ARRAY_LEN ? BYTE_ARRAYS.get()
-            : PlatformDependent.allocateUninitializedArray(minLength);
+        // Only make use of ThreadLocal if we use a FastThreadLocalThread to make the implementation
+        // Virtual Thread friendly.
+        // See https://github.com/netty/netty/issues/14609
+        if (minLength <= MAX_TL_ARRAY_LEN && FastThreadLocalThread.currentThreadHasFastThreadLocal()) {
+            return BYTE_ARRAYS.get();
+        }
+        return PlatformDependent.allocateUninitializedArray(minLength);
     }
 
     /**
@@ -512,21 +522,6 @@ public final class ByteBufUtil {
         return Long.reverseBytes(value) >>> Integer.SIZE;
     }
 
-    private static final class SWARByteSearch {
-
-        private static long compilePattern(byte byteToFind) {
-            return (byteToFind & 0xFFL) * 0x101010101010101L;
-        }
-
-        private static int firstAnyPattern(long word, long pattern, boolean leading) {
-            long input = word ^ pattern;
-            long tmp = (input & 0x7F7F7F7F7F7F7F7FL) + 0x7F7F7F7F7F7F7F7FL;
-            tmp = ~(tmp | input | 0x7F7F7F7F7F7F7F7FL);
-            final int binaryPosition = leading? Long.numberOfLeadingZeros(tmp) : Long.numberOfTrailingZeros(tmp);
-            return binaryPosition >>> 3;
-        }
-    }
-
     private static int unrolledFirstIndexOf(AbstractByteBuf buffer, int fromIndex, int byteCount, byte value) {
         assert byteCount > 0 && byteCount < 8;
         if (buffer._getByte(fromIndex) == value) {
@@ -582,10 +577,10 @@ public final class ByteBufUtil {
         }
         final int length = toIndex - fromIndex;
         buffer.checkIndex(fromIndex, length);
-        if (!PlatformDependent.isUnaligned()) {
+        if (!SWAR_UNALIGNED) {
             return linearFirstIndexOf(buffer, fromIndex, toIndex, value);
         }
-        assert PlatformDependent.isUnaligned();
+        assert SWAR_UNALIGNED;
         int offset = fromIndex;
         final int byteCount = length & 7;
         if (byteCount > 0) {
@@ -602,13 +597,13 @@ public final class ByteBufUtil {
         final ByteOrder nativeOrder = ByteOrder.nativeOrder();
         final boolean isNative = nativeOrder == buffer.order();
         final boolean useLE = nativeOrder == ByteOrder.LITTLE_ENDIAN;
-        final long pattern = SWARByteSearch.compilePattern(value);
+        final long pattern = SWARUtil.compilePattern(value);
         for (int i = 0; i < longCount; i++) {
             // use the faster available getLong
             final long word = useLE? buffer._getLongLE(offset) : buffer._getLong(offset);
-            int index = SWARByteSearch.firstAnyPattern(word, pattern, isNative);
-            if (index < Long.BYTES) {
-                return offset + index;
+            final long result = SWARUtil.applyPattern(word, pattern);
+            if (result != 0) {
+                return offset + SWARUtil.getIndex(result, isNative);
             }
             offset += Long.BYTES;
         }
@@ -692,6 +687,24 @@ public final class ByteBufUtil {
     }
 
     /**
+     * Reads a big-endian unsigned 16-bit short integer from the buffer.
+     */
+    @SuppressWarnings("deprecation")
+    public static int readUnsignedShortBE(ByteBuf buf) {
+        return buf.order() == ByteOrder.BIG_ENDIAN? buf.readUnsignedShort() :
+                swapShort((short) buf.readUnsignedShort()) & 0xFFFF;
+    }
+
+    /**
+     * Reads a big-endian 32-bit integer from the buffer.
+     */
+    @SuppressWarnings("deprecation")
+    public static int readIntBE(ByteBuf buf) {
+        return buf.order() == ByteOrder.BIG_ENDIAN? buf.readInt() :
+                swapInt(buf.readInt());
+    }
+
+    /**
      * Read the given amount of bytes into a new {@link ByteBuf} that is allocated from the {@link ByteBufAllocator}.
      */
     public static ByteBuf readBytes(ByteBufAllocator alloc, ByteBuf buffer, int length) {
@@ -708,20 +721,92 @@ public final class ByteBufUtil {
         }
     }
 
-    static int lastIndexOf(AbstractByteBuf buffer, int fromIndex, int toIndex, byte value) {
+    static int lastIndexOf(final AbstractByteBuf buffer, int fromIndex, final int toIndex, final byte value) {
         assert fromIndex > toIndex;
         final int capacity = buffer.capacity();
         fromIndex = Math.min(fromIndex, capacity);
-        if (fromIndex < 0 || capacity == 0) {
+        if (fromIndex <= 0) { // fromIndex is the exclusive upper bound.
             return -1;
         }
-        buffer.checkIndex(toIndex, fromIndex - toIndex);
+        final int length = fromIndex - toIndex;
+        buffer.checkIndex(toIndex, length);
+        if (!SWAR_UNALIGNED) {
+            return linearLastIndexOf(buffer, fromIndex, toIndex, value);
+        }
+        final int longCount = length >>> 3;
+        if (longCount > 0) {
+            final ByteOrder nativeOrder = ByteOrder.nativeOrder();
+            final boolean isNative = nativeOrder == buffer.order();
+            final boolean useLE = nativeOrder == ByteOrder.LITTLE_ENDIAN;
+            final long pattern = SWARUtil.compilePattern(value);
+            for (int i = 0, offset = fromIndex - Long.BYTES; i < longCount; i++, offset -= Long.BYTES) {
+                // use the faster available getLong
+                final long word = useLE? buffer._getLongLE(offset) : buffer._getLong(offset);
+                final long result = SWARUtil.applyPattern(word, pattern);
+                if (result != 0) {
+                    // used the oppoiste endianness since we are looking for the last index.
+                    return offset + Long.BYTES - 1 - SWARUtil.getIndex(result, !isNative);
+                }
+            }
+        }
+        return unrolledLastIndexOf(buffer, fromIndex - (longCount << 3), length & 7, value);
+    }
+
+    private static int linearLastIndexOf(final AbstractByteBuf buffer, final int fromIndex, final int toIndex,
+                                         final byte value) {
         for (int i = fromIndex - 1; i >= toIndex; i--) {
             if (buffer._getByte(i) == value) {
                 return i;
             }
         }
+        return -1;
+    }
 
+    private static int unrolledLastIndexOf(final AbstractByteBuf buffer, final int fromIndex, final int byteCount,
+                                           final byte value) {
+        assert byteCount >= 0 && byteCount < 8;
+        if (byteCount == 0) {
+            return -1;
+        }
+        if (buffer._getByte(fromIndex - 1) == value) {
+            return fromIndex - 1;
+        }
+        if (byteCount == 1) {
+            return -1;
+        }
+        if (buffer._getByte(fromIndex - 2) == value) {
+            return fromIndex - 2;
+        }
+        if (byteCount == 2) {
+            return -1;
+        }
+        if (buffer._getByte(fromIndex - 3) == value) {
+            return fromIndex - 3;
+        }
+        if (byteCount == 3) {
+            return -1;
+        }
+        if (buffer._getByte(fromIndex - 4) == value) {
+            return fromIndex - 4;
+        }
+        if (byteCount == 4) {
+            return -1;
+        }
+        if (buffer._getByte(fromIndex - 5) == value) {
+            return fromIndex - 5;
+        }
+        if (byteCount == 5) {
+            return -1;
+        }
+        if (buffer._getByte(fromIndex - 6) == value) {
+            return fromIndex - 6;
+        }
+        if (byteCount == 6) {
+            return -1;
+        }
+        if (buffer._getByte(fromIndex - 7) == value) {
+            return fromIndex - 7;
+        }
         return -1;
     }
 
@@ -839,8 +924,7 @@ public final class ByteBufUtil {
             if (buffer.hasArray()) {
                 return safeArrayWriteUtf8(buffer.array(), buffer.arrayOffset() + writerIndex, seq, start, end);
             }
-            if (buffer.isDirect()) {
-                assert buffer.nioBufferCount() == 1;
+            if (buffer.isDirect() && buffer.nioBufferCount() == 1) {
                 final ByteBuffer internalDirectBuffer = buffer.internalNioBuffer(writerIndex, reservedBytes);
                 final int bufferPosition = internalDirectBuffer.position();
                 return safeDirectWriteUtf8(internalDirectBuffer, bufferPosition, seq, start, end);
@@ -1068,6 +1152,9 @@ public final class ByteBufUtil {
      * It behaves like {@link #utf8MaxBytes(int)} applied to {@code seq} {@link CharSequence#length()}.
      */
     public static int utf8MaxBytes(CharSequence seq) {
+        if (seq instanceof AsciiString) {
+            return seq.length();
+        }
         return utf8MaxBytes(seq.length());
     }
 
@@ -1187,9 +1274,16 @@ public final class ByteBufUtil {
         }
     }
 
-    // Fast-Path implementation
     static int writeAscii(AbstractByteBuf buffer, int writerIndex, CharSequence seq, int len) {
+        if (seq instanceof AsciiString) {
+            writeAsciiString(buffer, writerIndex, (AsciiString) seq, 0, len);
+        } else {
+            writeAsciiCharSequence(buffer, writerIndex, seq, len);
+        }
+        return len;
+    }
 
+    private static int writeAsciiCharSequence(AbstractByteBuf buffer, int writerIndex, CharSequence seq, int len) {
         // We can use the _set methods as these not need to do any index checks and reference checks.
         // This is possible as we called ensureWritable(...) before.
         for (int i = 0; i < len; i++) {
@@ -1608,13 +1702,13 @@ public final class ByteBufUtil {
 
     static final class ThreadLocalUnsafeDirectByteBuf extends UnpooledUnsafeDirectByteBuf {
 
-        private static final ObjectPool<ThreadLocalUnsafeDirectByteBuf> RECYCLER =
-                ObjectPool.newPool(new ObjectCreator<ThreadLocalUnsafeDirectByteBuf>() {
+        private static final Recycler<ThreadLocalUnsafeDirectByteBuf> RECYCLER =
+                new Recycler<ThreadLocalUnsafeDirectByteBuf>() {
                     @Override
-                    public ThreadLocalUnsafeDirectByteBuf newObject(Handle<ThreadLocalUnsafeDirectByteBuf> handle) {
+                    protected ThreadLocalUnsafeDirectByteBuf newObject(Handle<ThreadLocalUnsafeDirectByteBuf> handle) {
                         return new ThreadLocalUnsafeDirectByteBuf(handle);
                     }
-                });
+                };
 
         static ThreadLocalUnsafeDirectByteBuf newInstance() {
             ThreadLocalUnsafeDirectByteBuf buf = RECYCLER.get();
@@ -1622,11 +1716,11 @@ public final class ByteBufUtil {
             return buf;
         }
 
-        private final Handle<ThreadLocalUnsafeDirectByteBuf> handle;
+        private final EnhancedHandle<ThreadLocalUnsafeDirectByteBuf> handle;
 
         private ThreadLocalUnsafeDirectByteBuf(Handle<ThreadLocalUnsafeDirectByteBuf> handle) {
             super(UnpooledByteBufAllocator.DEFAULT, 256, Integer.MAX_VALUE);
-            this.handle = handle;
+            this.handle = (EnhancedHandle<ThreadLocalUnsafeDirectByteBuf>) handle;
         }
 
         @Override
@@ -1635,20 +1729,19 @@ public final class ByteBufUtil {
                 super.deallocate();
             } else {
                 clear();
-                handle.recycle(this);
+                handle.unguardedRecycle(this);
             }
         }
     }
 
     static final class ThreadLocalDirectByteBuf extends UnpooledDirectByteBuf {
 
-        private static final ObjectPool<ThreadLocalDirectByteBuf> RECYCLER = ObjectPool.newPool(
-                new ObjectCreator<ThreadLocalDirectByteBuf>() {
+        private static final Recycler<ThreadLocalDirectByteBuf> RECYCLER = new Recycler<ThreadLocalDirectByteBuf>() {
             @Override
-            public ThreadLocalDirectByteBuf newObject(Handle<ThreadLocalDirectByteBuf> handle) {
+            protected ThreadLocalDirectByteBuf newObject(Handle<ThreadLocalDirectByteBuf> handle) {
                 return new ThreadLocalDirectByteBuf(handle);
             }
-        });
+        };
 
         static ThreadLocalDirectByteBuf newInstance() {
             ThreadLocalDirectByteBuf buf = RECYCLER.get();
@@ -1656,11 +1749,11 @@ public final class ByteBufUtil {
             return buf;
         }
 
-        private final Handle<ThreadLocalDirectByteBuf> handle;
+        private final EnhancedHandle<ThreadLocalDirectByteBuf> handle;
 
         private ThreadLocalDirectByteBuf(Handle<ThreadLocalDirectByteBuf> handle) {
             super(UnpooledByteBufAllocator.DEFAULT, 256, Integer.MAX_VALUE);
-            this.handle = handle;
+            this.handle = (EnhancedHandle<ThreadLocalDirectByteBuf>) handle;
         }
 
         @Override
@@ -1669,7 +1762,7 @@ public final class ByteBufUtil {
                 super.deallocate();
             } else {
                 clear();
-                handle.recycle(this);
+                handle.unguardedRecycle(this);
             }
         }
     }
@@ -1881,7 +1974,7 @@ public final class ByteBufUtil {
             out.write(buffer.array(), position + buffer.arrayOffset(), length);
         } else {
             int chunkLen = Math.min(length, WRITE_CHUNK_SIZE);
-            buffer.clear().position(position);
+            buffer.clear().position(position).limit(position + length);
 
             if (length <= MAX_TL_ARRAY_LEN || !allocator.isDirectBufferPooled()) {
                 getBytes(buffer, threadLocalTempArray(chunkLen), 0, chunkLen, out, length);
@@ -1907,6 +2000,15 @@ public final class ByteBufUtil {
             out.write(in, inOffset, len);
             outLen -= len;
         } while (outLen > 0);
+    }
+
+    /**
+     * Set {@link AbstractByteBuf#leakDetector}'s {@link ResourceLeakDetector.LeakListener}.
+     *
+     * @param leakListener If leakListener is not null, it will be notified once a ByteBuf leak is detected.
+     */
+    public static void setLeakListener(ResourceLeakDetector.LeakListener leakListener) {
+        AbstractByteBuf.leakDetector.setLeakListener(leakListener);
     }
 
     private ByteBufUtil() { }

@@ -305,7 +305,7 @@ final class HpackEncoder {
                 AsciiString asciiString = (AsciiString) string;
                 out.writeBytes(asciiString.array(), asciiString.arrayOffset(), asciiString.length());
             } else {
-                // Only ASCII is allowed in http2 headers, so its fine to use this.
+                // Only ASCII is allowed in http2 headers, so it is fine to use this.
                 // https://tools.ietf.org/html/rfc7540#section-8.1.2
                 out.writeCharSequence(string, CharsetUtil.ISO_8859_1);
             }
@@ -329,7 +329,7 @@ final class HpackEncoder {
                 encodeInteger(out, 0x10, 4, nameIndexValid ? nameIndex : 0);
                 break;
             default:
-                throw new Error("should not reach here");
+                throw new Error("Unexpected index type: " + indexType);
         }
         if (!nameIndexValid) {
             encodeStringLiteral(out, name);

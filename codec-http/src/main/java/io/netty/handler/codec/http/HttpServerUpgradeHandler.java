@@ -14,6 +14,7 @@
  */
 package io.netty.handler.codec.http;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelFutureListener;
@@ -169,8 +170,11 @@ public class HttpServerUpgradeHandler extends HttpObjectAggregator {
 
     private final SourceCodec sourceCodec;
     private final UpgradeCodecFactory upgradeCodecFactory;
-    private final boolean validateHeaders;
+    private final HttpHeadersFactory headersFactory;
+    private final HttpHeadersFactory trailersFactory;
+    private final boolean removeAfterFirstRequest;
     private boolean handlingUpgrade;
+    private boolean failedAggregationStart;
 
     /**
      * Constructs the upgrader with the supported codecs.
@@ -187,7 +191,8 @@ public class HttpServerUpgradeHandler extends HttpObjectAggregator {
      *                            for one of the requested upgrade protocols
      */
     public HttpServerUpgradeHandler(SourceCodec sourceCodec, UpgradeCodecFactory upgradeCodecFactory) {
-        this(sourceCodec, upgradeCodecFactory, 0);
+        this(sourceCodec, upgradeCodecFactory, 0,
+                DefaultHttpHeadersFactory.headersFactory(), DefaultHttpHeadersFactory.trailersFactory());
     }
 
     /**
@@ -200,7 +205,8 @@ public class HttpServerUpgradeHandler extends HttpObjectAggregator {
      */
     public HttpServerUpgradeHandler(
             SourceCodec sourceCodec, UpgradeCodecFactory upgradeCodecFactory, int maxContentLength) {
-        this(sourceCodec, upgradeCodecFactory, maxContentLength, true);
+        this(sourceCodec, upgradeCodecFactory, maxContentLength,
+                DefaultHttpHeadersFactory.headersFactory(), DefaultHttpHeadersFactory.trailersFactory());
     }
 
     /**
@@ -214,11 +220,53 @@ public class HttpServerUpgradeHandler extends HttpObjectAggregator {
      */
     public HttpServerUpgradeHandler(SourceCodec sourceCodec, UpgradeCodecFactory upgradeCodecFactory,
                                     int maxContentLength, boolean validateHeaders) {
+        this(sourceCodec, upgradeCodecFactory, maxContentLength,
+                DefaultHttpHeadersFactory.headersFactory().withValidation(validateHeaders),
+                DefaultHttpHeadersFactory.trailersFactory().withValidation(validateHeaders));
+    }
+
+    /**
+     * Constructs the upgrader with the supported codecs.
+     *
+     * @param sourceCodec the codec that is being used initially
+     * @param upgradeCodecFactory the factory that creates a new upgrade codec
+     *                            for one of the requested upgrade protocols
+     * @param maxContentLength the maximum length of the content of an upgrade request
+     * @param headersFactory The {@link HttpHeadersFactory} to use for headers.
+     * The recommended default factory is {@link DefaultHttpHeadersFactory#headersFactory()}.
+     * @param trailersFactory The {@link HttpHeadersFactory} to use for trailers.
+     * The recommended default factory is {@link DefaultHttpHeadersFactory#trailersFactory()}.
+     */
+    public HttpServerUpgradeHandler(
+            SourceCodec sourceCodec, UpgradeCodecFactory upgradeCodecFactory, int maxContentLength,
+            HttpHeadersFactory headersFactory, HttpHeadersFactory trailersFactory) {
+        this(sourceCodec, upgradeCodecFactory, maxContentLength, headersFactory, trailersFactory, false);
+    }
+
+    /**
+     * Constructs the upgrader with the supported codecs.
+     *
+     * @param sourceCodec the codec that is being used initially
+     * @param upgradeCodecFactory the factory that creates a new upgrade codec
+     *                            for one of the requested upgrade protocols
+     * @param maxContentLength the maximum length of the content of an upgrade request
+     * @param headersFactory The {@link HttpHeadersFactory} to use for headers.
+     * The recommended default factory is {@link DefaultHttpHeadersFactory#headersFactory()}.
+     * @param trailersFactory The {@link HttpHeadersFactory} to use for trailers.
+     * The recommended default factory is {@link DefaultHttpHeadersFactory#trailersFactory()}.
+     * @param removeAfterFirstRequest {@code true} if the handler should remove itself after the first request was
+     *                                processed (even if it was not an upgrade request), {@code false} otherwise.
+     */
+    public HttpServerUpgradeHandler(
+            SourceCodec sourceCodec, UpgradeCodecFactory upgradeCodecFactory, int maxContentLength,
+            HttpHeadersFactory headersFactory, HttpHeadersFactory trailersFactory, boolean removeAfterFirstRequest) {
         super(maxContentLength);
 
         this.sourceCodec = checkNotNull(sourceCodec, "sourceCodec");
         this.upgradeCodecFactory = checkNotNull(upgradeCodecFactory, "upgradeCodecFactory");
-        this.validateHeaders = validateHeaders;
+        this.headersFactory = checkNotNull(headersFactory, "headersFactory");
+        this.trailersFactory = checkNotNull(trailersFactory, "trailersFactory");
+        this.removeAfterFirstRequest = removeAfterFirstRequest;
     }
 
     @Override
@@ -232,7 +280,12 @@ public class HttpServerUpgradeHandler extends HttpObjectAggregator {
                 if (req.headers().contains(HttpHeaderNames.UPGRADE) &&
                     shouldHandleUpgradeRequest(req)) {
                     handlingUpgrade = true;
+                    failedAggregationStart = true; // reset if beginAggregation is called
                 } else {
+                    if (removeAfterFirstRequest) {
+                        // This is not an upgrade request, just remove this handler.
+                        ctx.pipeline().remove(this);
+                    }
                     ReferenceCountUtil.retain(msg);
                     ctx.fireChannelRead(msg);
                     return;
@@ -253,6 +306,12 @@ public class HttpServerUpgradeHandler extends HttpObjectAggregator {
             // Call the base class to handle the aggregation of the full request.
             super.decode(ctx, msg, out);
             if (out.isEmpty()) {
+                if (msg instanceof LastHttpContent || failedAggregationStart) {
+                    // request failed to aggregate, try with the next request
+                    handlingUpgrade = false;
+                    releaseCurrentMessage();
+                }
+
                 // The full request hasn't been created yet, still awaiting more data.
                 return;
             }
@@ -268,10 +327,19 @@ public class HttpServerUpgradeHandler extends HttpObjectAggregator {
             // so that it's not propagated to the next handler. This request will
             // be propagated as a user event instead.
             out.clear();
+        } else if (removeAfterFirstRequest) {
+            // We handle the first request and were not able to upgrade, just remove this handler.
+            ctx.pipeline().remove(this);
         }
 
         // The upgrade did not succeed, just allow the full request to propagate to the
         // next handler.
+    }
+
+    @Override
+    protected FullHttpMessage beginAggregation(HttpMessage start, ByteBuf content) throws Exception {
+        failedAggregationStart = false;
+        return super.beginAggregation(start, content);
     }
 
     /**
@@ -391,7 +459,7 @@ public class HttpServerUpgradeHandler extends HttpObjectAggregator {
      */
     private FullHttpResponse createUpgradeResponse(CharSequence upgradeProtocol) {
         DefaultFullHttpResponse res = new DefaultFullHttpResponse(
-                HTTP_1_1, SWITCHING_PROTOCOLS, Unpooled.EMPTY_BUFFER, validateHeaders);
+                HTTP_1_1, SWITCHING_PROTOCOLS, Unpooled.EMPTY_BUFFER, headersFactory, trailersFactory);
         res.headers().add(HttpHeaderNames.CONNECTION, HttpHeaderValues.UPGRADE);
         res.headers().add(HttpHeaderNames.UPGRADE, upgradeProtocol);
         return res;

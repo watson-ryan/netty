@@ -15,6 +15,7 @@
  */
 package io.netty.handler.ssl;
 
+import io.netty.util.ReferenceCountUtil;
 import io.netty.util.internal.ResourcesUtil;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.function.Executable;
@@ -79,7 +80,7 @@ public abstract class SslContextTest {
         File keyFile = ResourcesUtil.getFile(getClass(), "test_encrypted.pem");
         File crtFile = ResourcesUtil.getFile(getClass(), "test.crt");
 
-        newSslContext(crtFile, keyFile, "12345");
+        ReferenceCountUtil.release(newSslContext(crtFile, keyFile, "12345"));
     }
 
     @Test
@@ -87,7 +88,7 @@ public abstract class SslContextTest {
         File keyFile = ResourcesUtil.getFile(getClass(), "test2_encrypted.pem");
         File crtFile = ResourcesUtil.getFile(getClass(), "test2.crt");
 
-        newSslContext(crtFile, keyFile, "12345");
+        ReferenceCountUtil.release(newSslContext(crtFile, keyFile, "12345"));
     }
 
     @Test
@@ -95,7 +96,7 @@ public abstract class SslContextTest {
         File keyFile = ResourcesUtil.getFile(getClass(), "test_unencrypted.pem");
         File crtFile = ResourcesUtil.getFile(getClass(), "test.crt");
 
-        newSslContext(crtFile, keyFile, null);
+        ReferenceCountUtil.release(newSslContext(crtFile, keyFile, null));
     }
 
     @Test
@@ -130,6 +131,7 @@ public abstract class SslContextTest {
 
         SslContext sslContext = newSslContext(crtFile, keyFile, null);
         assertFalse(sslContext.cipherSuites().contains(unsupportedCipher));
+        ReferenceCountUtil.release(sslContext);
     }
 
     @Test
@@ -170,6 +172,13 @@ public abstract class SslContextTest {
     public void testPkcs8Des3EncryptedRsa() throws Exception {
         PrivateKey key = SslContext.toPrivateKey(new File(getClass().getResource("rsa_pkcs8_des3_encrypted.key")
                 .getFile()), "example");
+        assertNotNull(key);
+    }
+
+    @Test
+    public void testPkcs8Pbes2()  throws Exception {
+        PrivateKey key = SslContext.toPrivateKey(new File(getClass().getResource("rsa_pbes2_enc_pkcs8.key")
+                .getFile()), "12345678", false);
         assertNotNull(key);
     }
 

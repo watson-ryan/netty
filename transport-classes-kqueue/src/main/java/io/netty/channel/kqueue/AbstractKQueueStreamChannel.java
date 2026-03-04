@@ -33,6 +33,7 @@ import io.netty.channel.socket.DuplexChannel;
 import io.netty.channel.unix.IovArray;
 import io.netty.channel.unix.SocketWritableByteChannel;
 import io.netty.channel.unix.UnixChannelUtil;
+import io.netty.util.LeakPresenceDetector;
 import io.netty.util.internal.StringUtil;
 import io.netty.util.internal.UnstableApi;
 import io.netty.util.internal.logging.InternalLogger;
@@ -46,8 +47,8 @@ import java.util.concurrent.Executor;
 
 import static io.netty.channel.internal.ChannelUtils.MAX_BYTES_PER_GATHERING_WRITE_ATTEMPTED_LOW_THRESHOLD;
 import static io.netty.channel.internal.ChannelUtils.WRITE_STATUS_SNDBUF_FULL;
+import static io.netty.util.internal.StringUtil.className;
 
-@UnstableApi
 public abstract class AbstractKQueueStreamChannel extends AbstractKQueueChannel implements DuplexChannel {
     private static final InternalLogger logger = InternalLoggerFactory.getInstance(AbstractKQueueStreamChannel.class);
     private static final ChannelMetadata METADATA = new ChannelMetadata(false, 16);
@@ -327,7 +328,7 @@ public abstract class AbstractKQueueStreamChannel extends AbstractKQueueChannel 
             return writeFileRegion(in, (FileRegion) msg);
         } else {
             // Should never reach here.
-            throw new Error();
+            throw new Error("Unexpected message type: " + className(msg));
         }
     }
 
@@ -347,7 +348,7 @@ public abstract class AbstractKQueueStreamChannel extends AbstractKQueueChannel 
      */
     private int doWriteMultiple(ChannelOutboundBuffer in) throws Exception {
         final long maxBytesPerGatheringWrite = config().getMaxBytesPerGatheringWrite();
-        IovArray array = ((KQueueEventLoop) eventLoop()).cleanArray();
+        IovArray array = ((NativeArrays) registration().attachment()).cleanIovArray();
         array.maxBytes(maxBytesPerGatheringWrite);
         in.forEachFlushedMessage(array);
 
@@ -518,7 +519,6 @@ public abstract class AbstractKQueueStreamChannel extends AbstractKQueueChannel 
             final ChannelPipeline pipeline = pipeline();
             final ByteBufAllocator allocator = config.getAllocator();
             allocHandle.reset(config);
-            readReadyBefore();
 
             ByteBuf byteBuf = null;
             boolean close = false;
@@ -569,7 +569,9 @@ public abstract class AbstractKQueueStreamChannel extends AbstractKQueueChannel 
             } catch (Throwable t) {
                 handleReadException(pipeline, byteBuf, t, close, allocHandle);
             } finally {
-                readReadyFinally(config);
+                if (shouldStopReading(config)) {
+                    clearReadFilter0();
+                }
             }
         }
 
@@ -590,7 +592,10 @@ public abstract class AbstractKQueueStreamChannel extends AbstractKQueueChannel 
 
                 // If oom will close the read event, release connection.
                 // See https://github.com/netty/netty/issues/10434
-                if (close || cause instanceof OutOfMemoryError || cause instanceof IOException) {
+                if (close ||
+                        cause instanceof OutOfMemoryError ||
+                        cause instanceof LeakPresenceDetector.AllocationProhibitedException ||
+                        cause instanceof IOException) {
                     shutdownInput(false);
                 }
             }

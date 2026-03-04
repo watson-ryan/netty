@@ -32,7 +32,10 @@ import io.netty.channel.ChannelPromise;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.FutureListener;
+import io.netty.util.concurrent.MockTicker;
 import io.netty.util.concurrent.ScheduledFuture;
+import io.netty.util.concurrent.Ticker;
+import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 
@@ -91,13 +94,7 @@ public class EmbeddedChannelTest {
     @Timeout(value = 2000, unit = TimeUnit.MILLISECONDS)
     public void promiseDoesNotInfiniteLoop() throws InterruptedException {
         EmbeddedChannel channel = new EmbeddedChannel();
-        channel.closeFuture().addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) throws Exception {
-                future.channel().close();
-            }
-        });
-
+        channel.closeFuture().addListener((ChannelFutureListener) future -> future.channel().close());
         channel.close().syncUninterruptibly();
     }
 
@@ -139,12 +136,7 @@ public class EmbeddedChannelTest {
                 latch.countDown();
             }
         }, 1, TimeUnit.SECONDS);
-        future.addListener(new FutureListener() {
-            @Override
-            public void operationComplete(Future future) throws Exception {
-                latch.countDown();
-            }
-        });
+        future.addListener((FutureListener) future1 -> latch.countDown());
         long next = ch.runScheduledPendingTasks();
         assertTrue(next > 0);
         // Sleep for the nanoseconds but also give extra 50ms as the clock my not be very precise and so fail the test
@@ -626,13 +618,8 @@ public class EmbeddedChannelTest {
             }
         });
 
-        final EmbeddedEventLoop embeddedEventLoop = new EmbeddedEventLoop();
-        channel.deregister().addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) {
-                embeddedEventLoop.register(channel);
-            }
-        });
+        final EmbeddedEventLoop embeddedEventLoop = new EmbeddedEventLoop(new EmbeddedEventLoop.FreezableTicker());
+        channel.deregister().addListener(f -> embeddedEventLoop.register(channel));
 
         if (!unregisteredLatch.await(5, TimeUnit.SECONDS)) {
             fail("Channel was not unregistered in time.");
@@ -736,6 +723,48 @@ public class EmbeddedChannelTest {
     }
 
     @Test
+    @Timeout(30) // generous timeout, just make sure we don't actually wait for the full 10 mins...
+    void testCustomTicker() {
+        MockTicker ticker = Ticker.newMockTicker();
+        EmbeddedChannel channel = EmbeddedChannel.builder().ticker(ticker).build();
+        Runnable runnable = new Runnable() {
+            @Override
+            public void run() {
+            }
+        };
+
+        // this future will complete after 10min
+        ScheduledFuture<?> future10 = channel.eventLoop().schedule(runnable, 10, TimeUnit.MINUTES);
+        // this future will complete after 10min + 1ns
+        ScheduledFuture<?> future101 = channel.eventLoop().schedule(runnable,
+                TimeUnit.MINUTES.toNanos(10) + 1, TimeUnit.NANOSECONDS);
+        // this future will complete after 20min
+        ScheduledFuture<?> future20 = channel.eventLoop().schedule(runnable, 20, TimeUnit.MINUTES);
+
+        channel.runPendingTasks();
+        assertFalse(future10.isDone());
+        assertFalse(future101.isDone());
+        assertFalse(future20.isDone());
+
+        ticker.advance(10, TimeUnit.MINUTES);
+        channel.runPendingTasks();
+        assertTrue(future10.isDone());
+        assertFalse(future101.isDone());
+        assertFalse(future20.isDone());
+
+        ticker.advance(1, TimeUnit.NANOSECONDS);
+        channel.runPendingTasks();
+        assertTrue(future101.isDone());
+        assertFalse(future20.isDone());
+    }
+
+    @Test
+    void testDefaultTickerCannotSleep() {
+        Ticker ticker = new EmbeddedChannel().eventLoop().ticker();
+        Assertions.assertThrows(UnsupportedOperationException.class, () -> ticker.sleep(1, TimeUnit.SECONDS));
+    }
+
+    @Test
     void testHasPendingTasks() {
         EmbeddedChannel channel = new EmbeddedChannel();
         channel.freezeTime();
@@ -761,6 +790,33 @@ public class EmbeddedChannelTest {
         assertTrue(channel.hasPendingTasks());
         channel.runPendingTasks();
         assertFalse(channel.hasPendingTasks());
+    }
+
+    @Test
+    void testReentrantClose() {
+        EmbeddedChannel channel = new EmbeddedChannel();
+        channel.pipeline().addLast(new ChannelInboundHandlerAdapter() {
+            boolean runningRead;
+
+            @Override
+            public void channelRead(ChannelHandlerContext ctx, Object msg) {
+                runningRead = true;
+                try {
+                    ctx.channel().close();
+                } finally {
+                    runningRead = false;
+                }
+            }
+
+            @Override
+            public void handlerRemoved(ChannelHandlerContext ctx) {
+                if (runningRead) {
+                    throw new IllegalStateException("Reentrant handlerRemoved");
+                }
+            }
+        });
+        channel.writeInbound("foo");
+        channel.checkException();
     }
 
     private static void release(ByteBuf... buffers) {

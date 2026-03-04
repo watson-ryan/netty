@@ -16,6 +16,7 @@
 package io.netty.handler.ssl;
 
 import io.netty.buffer.ByteBufAllocator;
+import io.netty.handler.ssl.util.BouncyCastleUtil;
 
 import javax.net.ssl.SSLEngine;
 
@@ -28,8 +29,7 @@ import javax.net.ssl.SSLEngine;
 public final class JdkAlpnApplicationProtocolNegotiator extends JdkBaseApplicationProtocolNegotiator {
     private static final boolean AVAILABLE = Conscrypt.isAvailable() ||
                                              JdkAlpnSslUtils.supportsAlpn() ||
-                                             JettyAlpnSslEngine.isAvailable() ||
-                                             BouncyCastle.isAvailable();
+            (BouncyCastleUtil.isBcTlsAvailable() && BouncyCastleAlpnSslUtils.isAlpnSupported());
 
     private static final SslEngineWrapperFactory ALPN_WRAPPER = AVAILABLE ? new AlpnWrapper() : new FailureWrapper();
 
@@ -119,10 +119,8 @@ public final class JdkAlpnApplicationProtocolNegotiator extends JdkBaseApplicati
         @Override
         public SSLEngine wrapSslEngine(SSLEngine engine, ByteBufAllocator alloc,
                                        JdkApplicationProtocolNegotiator applicationNegotiator, boolean isServer) {
-            throw new RuntimeException("ALPN unsupported. Is your classpath configured correctly?"
-                    + " For Conscrypt, add the appropriate Conscrypt JAR to classpath and set the security provider."
-                    + " For Jetty-ALPN, see "
-                    + "https://www.eclipse.org/jetty/documentation/current/alpn-chapter.html#alpn-starting");
+            throw new RuntimeException("ALPN unsupported. Does your JDK version support it?"
+                    + " For Conscrypt, add the appropriate Conscrypt JAR to classpath and set the security provider.");
         }
     }
 
@@ -134,7 +132,7 @@ public final class JdkAlpnApplicationProtocolNegotiator extends JdkBaseApplicati
                 return isServer ? ConscryptAlpnSslEngine.newServerEngine(engine, alloc, applicationNegotiator)
                         : ConscryptAlpnSslEngine.newClientEngine(engine, alloc, applicationNegotiator);
             }
-            if (BouncyCastle.isInUse(engine)) {
+            if (BouncyCastleUtil.isBcJsseInUse(engine) && BouncyCastleAlpnSslUtils.isAlpnSupported()) {
                 return new BouncyCastleAlpnSslEngine(engine, applicationNegotiator, isServer);
             }
             // ALPN support was recently backported to Java8 as
@@ -143,10 +141,6 @@ public final class JdkAlpnApplicationProtocolNegotiator extends JdkBaseApplicati
             // present
             if (JdkAlpnSslUtils.supportsAlpn()) {
                 return new JdkAlpnSslEngine(engine, applicationNegotiator, isServer);
-            }
-            if (JettyAlpnSslEngine.isAvailable()) {
-                return isServer ? JettyAlpnSslEngine.newServerEngine(engine, applicationNegotiator)
-                        : JettyAlpnSslEngine.newClientEngine(engine, applicationNegotiator);
             }
             throw new UnsupportedOperationException("ALPN not supported. Unable to wrap SSLEngine of type '"
                     + engine.getClass().getName() + "')");

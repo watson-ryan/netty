@@ -21,7 +21,8 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.http.DefaultHttpHeaders;
@@ -58,6 +59,7 @@ import java.net.URI;
 public final class WebSocketClient {
 
     static final String URL = System.getProperty("url", "ws://127.0.0.1:8080/websocket");
+    static final int MAX_CONTENT_LENGTH = 8192;
 
     public static void main(String[] args) throws Exception {
         URI uri = new URI(URL);
@@ -90,7 +92,7 @@ public final class WebSocketClient {
             sslCtx = null;
         }
 
-        EventLoopGroup group = new NioEventLoopGroup();
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
         try {
             // Connect with V13 (RFC 6455 aka HyBi-17). You can change it to V08 or V00.
             // If you change it to V00, ping is not supported and remember to change
@@ -112,8 +114,8 @@ public final class WebSocketClient {
                      }
                      p.addLast(
                              new HttpClientCodec(),
-                             new HttpObjectAggregator(8192),
-                             WebSocketClientCompressionHandler.INSTANCE,
+                             new HttpObjectAggregator(MAX_CONTENT_LENGTH),
+                             new WebSocketClientCompressionHandler(MAX_CONTENT_LENGTH),
                              handler);
                  }
              });

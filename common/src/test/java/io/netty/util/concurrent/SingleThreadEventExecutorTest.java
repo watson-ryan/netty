@@ -15,9 +15,8 @@
  */
 package io.netty.util.concurrent;
 
+import org.jetbrains.annotations.NotNull;
 import org.junit.jupiter.api.Test;
-
-import io.netty.util.concurrent.AbstractEventExecutor.LazyRunnable;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.function.Executable;
 
@@ -30,20 +29,223 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.hamcrest.CoreMatchers.*;
-import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 public class SingleThreadEventExecutorTest {
+
+    private static final class TestThread extends Thread {
+        private final CountDownLatch startedLatch = new CountDownLatch(1);
+        private final CountDownLatch runLatch = new CountDownLatch(1);
+
+        TestThread(Runnable task) {
+            super(task);
+        }
+
+        @Override
+        public void start() {
+            super.start();
+            startedLatch.countDown();
+        }
+
+        @Override
+        public void run() {
+            runLatch.countDown();
+            super.run();
+        }
+
+        void awaitStarted() throws InterruptedException {
+            startedLatch.await();
+        }
+
+        void awaitRunnableExecution() throws InterruptedException {
+            runLatch.await();
+        }
+    }
+
+    private static final class TestThreadFactory implements ThreadFactory {
+        final LinkedBlockingQueue<TestThread> threads = new LinkedBlockingQueue<>();
+        @Override
+        public Thread newThread(@NotNull Runnable r) {
+            TestThread thread = new TestThread(r);
+            threads.add(thread);
+            return thread;
+        }
+    }
+
+    private static final class SuspendingSingleThreadEventExecutor extends SingleThreadEventExecutor {
+
+        SuspendingSingleThreadEventExecutor(ThreadFactory threadFactory) {
+            super(null, threadFactory, false, true,
+                    Integer.MAX_VALUE, RejectedExecutionHandlers.reject());
+        }
+
+        @Override
+        protected void run() {
+            while (!confirmShutdown() && !canSuspend()) {
+                Runnable task = takeTask();
+                if (task != null) {
+                    task.run();
+                }
+            }
+        }
+
+        @Override
+        protected void wakeup(boolean inEventLoop) {
+            interruptThread();
+        }
+    }
+
+    @Test
+    void testSuspension() throws Exception {
+        TestThreadFactory threadFactory = new TestThreadFactory();
+        final SingleThreadEventExecutor executor = new SuspendingSingleThreadEventExecutor(threadFactory);
+        LatchTask task1 = new LatchTask();
+        executor.execute(task1);
+        Thread currentThread = threadFactory.threads.take();
+        assertTrue(executor.trySuspend());
+        task1.await();
+
+        // Let's wait till the current Thread did die....
+        currentThread.join();
+
+        // Should be suspended now, we should be able to also call trySuspend() again.
+        assertTrue(executor.isSuspended());
+        // There was no thread created as we did not try to execute something yet.
+        assertTrue(threadFactory.threads.isEmpty());
+
+        LatchTask task2 = new LatchTask();
+        executor.execute(task2);
+        // Suspendion was reset as a task was executed.
+        assertFalse(executor.isSuspended());
+        currentThread = threadFactory.threads.take();
+        task2.await();
+
+        executor.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
+        currentThread.join();
+        assertFalse(executor.isSuspended());
+        assertTrue(executor.isShutdown());
+
+        // Guarantee that al tasks were able to die...
+        while ((currentThread = threadFactory.threads.poll()) != null) {
+            currentThread.join();
+        }
+    }
+
+    @Test
+    void testSuspensionWhenExecutorIsNotStarted() throws Exception {
+        TestThreadFactory threadFactory = new TestThreadFactory();
+        final SingleThreadEventExecutor executor = new SuspendingSingleThreadEventExecutor(threadFactory);
+        // suspend when executor is not started yet
+        assertTrue(executor.trySuspend());
+        assertTrue(executor.isSuspended());
+
+        // recover from suspension by executing a task
+        LatchTask task1 = new LatchTask();
+        executor.execute(task1);
+        Thread currentThread = threadFactory.threads.take();
+        assertFalse(executor.isSuspended());
+        task1.await();
+
+        executor.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
+        currentThread.join();
+        assertFalse(executor.isSuspended());
+        assertTrue(executor.isShutdown());
+
+        // Guarantee that all threads were able to die...
+        while ((currentThread = threadFactory.threads.poll()) != null) {
+            currentThread.join();
+        }
+    }
+
+    @Test
+    @Timeout(value = 10, unit = TimeUnit.SECONDS)
+    void testNotSuspendedUntilScheduledTaskIsCancelled() throws Exception {
+        TestThreadFactory threadFactory = new TestThreadFactory();
+        final SingleThreadEventExecutor executor = new SuspendingSingleThreadEventExecutor(threadFactory);
+
+        // Schedule a task which is so far in the future that we are sure it will not run at all.
+        Future<?> future = executor.schedule(() -> { }, 1, TimeUnit.DAYS);
+        TestThread currentThread = threadFactory.threads.take();
+        // Let's wait until the thread is started
+        currentThread.awaitStarted();
+        currentThread.awaitRunnableExecution();
+        assertTrue(executor.trySuspend());
+
+        // Now cancel the task which should allow the suspension to let the thread die once we call trySuspend() again
+        assertTrue(future.cancel(false));
+        future.await();
+
+        // Call in a loop as removal of scheduled tasks from task queue might be lazy
+        while (!executor.trySuspend()) {
+            Thread.sleep(50);
+        }
+
+        currentThread.join();
+
+        // Should be suspended now, we should be able to also call trySuspend() again.
+        assertTrue(executor.trySuspend());
+        assertTrue(executor.isSuspended());
+
+        executor.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
+        assertFalse(executor.isSuspended());
+        assertTrue(executor.isShutdown());
+
+        // Guarantee that al tasks were able to die...
+        while ((currentThread = threadFactory.threads.poll()) != null) {
+            currentThread.join();
+        }
+    }
+
+    @Test
+    void testNotSuspendedUntilScheduledTaskDidRun() throws Exception {
+        TestThreadFactory threadFactory = new TestThreadFactory();
+        final SingleThreadEventExecutor executor = new SuspendingSingleThreadEventExecutor(threadFactory);
+
+        final CountDownLatch latch = new CountDownLatch(1);
+        // Schedule a task which is so far in the future that we are sure it will not run at all.
+        Future<?> future = executor.schedule(() -> {
+            try {
+                latch.await();
+            } catch (InterruptedException ignore) {
+                // ignore
+            }
+        }, 100, TimeUnit.MILLISECONDS);
+        TestThread currentThread = threadFactory.threads.take();
+        // Let's wait until the thread is started
+        currentThread.awaitStarted();
+        currentThread.awaitRunnableExecution();
+        latch.countDown();
+        assertTrue(executor.trySuspend());
+
+        // Now wait till the scheduled task was run
+        future.sync();
+
+        currentThread.join();
+
+        // Should be suspended now, we should be able to also call trySuspend() again.
+        assertTrue(executor.trySuspend());
+        assertTrue(executor.isSuspended());
+
+        executor.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
+        assertFalse(executor.isSuspended());
+        assertTrue(executor.isShutdown());
+
+        // Guarantee that al tasks were able to die...
+        while ((currentThread = threadFactory.threads.poll()) != null) {
+            currentThread.join();
+        }
+    }
 
     @Test
     public void testWrappedExecutorIsShutdown() {
@@ -113,7 +315,7 @@ public class SingleThreadEventExecutorTest {
         assertEquals(thread.isAlive(), threadProperties.isAlive());
         assertEquals(thread.isDaemon(), threadProperties.isDaemon());
         assertTrue(threadProperties.stackTrace().length > 0);
-        executor.shutdownGracefully();
+        executor.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
     }
 
     @Test
@@ -193,7 +395,7 @@ public class SingleThreadEventExecutorTest {
                 }
             });
         } finally {
-            executor.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS);
+            executor.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
         }
     }
 
@@ -208,12 +410,18 @@ public class SingleThreadEventExecutorTest {
         }
     }
 
-    static class LazyLatchTask extends LatchTask implements LazyRunnable { }
+    static class LazyLatchTask extends LatchTask { }
 
     @Test
     public void testLazyExecution() throws Exception {
         final SingleThreadEventExecutor executor = new SingleThreadEventExecutor(null,
                 Executors.defaultThreadFactory(), false) {
+
+            @Override
+            protected boolean wakesUpForTask(final Runnable task) {
+                return !(task instanceof LazyLatchTask);
+            }
+
             @Override
             protected void run() {
                 while (!confirmShutdown()) {
@@ -267,6 +475,8 @@ public class SingleThreadEventExecutorTest {
         assertTrue(latch3.await(100, TimeUnit.MILLISECONDS));
         assertEquals(0, latch1.getCount());
         assertEquals(0, latch2.getCount());
+
+        executor.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
     }
 
     @Test
@@ -368,9 +578,10 @@ public class SingleThreadEventExecutorTest {
 
         f.sync();
 
-        assertThat(beforeTask.ran.get(), is(true));
-        assertThat(scheduledTask.ran.get(), is(true));
-        assertThat(afterTask.ran.get(), is(true));
+        assertTrue(beforeTask.ran.get());
+        assertTrue(scheduledTask.ran.get());
+        assertTrue(afterTask.ran.get());
+        executor.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
     }
 
     @Test
@@ -408,7 +619,8 @@ public class SingleThreadEventExecutorTest {
 
         f.sync();
 
-        assertThat(t.ran.get(), is(true));
+        assertTrue(t.ran.get());
+        executor.shutdownGracefully(0, 0, TimeUnit.MILLISECONDS).syncUninterruptibly();
     }
 
     private static final class TestRunnable implements Runnable {
@@ -421,5 +633,30 @@ public class SingleThreadEventExecutorTest {
         public void run() {
             ran.set(true);
         }
+    }
+
+    @Test
+    @Timeout(value = 5000, unit = TimeUnit.MILLISECONDS)
+    public void testExceptionIsPropagatedToTerminationFuture() throws Exception {
+        final IllegalStateException exception = new IllegalStateException();
+        final SingleThreadEventExecutor executor =
+                new SingleThreadEventExecutor(null, Executors.defaultThreadFactory(), true) {
+                    @Override
+                    protected void run() {
+                        throw exception;
+                    }
+                };
+
+        // Schedule something so we are sure the run() method will be called.
+        executor.execute(new Runnable() {
+            @Override
+            public void run() {
+                // Noop.
+            }
+        });
+
+        executor.terminationFuture().await();
+
+        assertSame(exception, executor.terminationFuture().cause());
     }
 }

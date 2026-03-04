@@ -22,6 +22,8 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelException;
 import io.netty.channel.ChannelMetadata;
 import io.netty.channel.ChannelOutboundBuffer;
+import io.netty.channel.IoRegistration;
+import io.netty.channel.nio.NioIoOps;
 import io.netty.util.internal.SocketUtils;
 import io.netty.channel.nio.AbstractNioMessageChannel;
 import io.netty.channel.udt.DefaultUdtChannelConfig;
@@ -38,8 +40,6 @@ import java.security.AccessController;
 import java.security.PrivilegedActionException;
 import java.security.PrivilegedExceptionAction;
 import java.util.List;
-
-import static java.nio.channels.SelectionKey.*;
 
 /**
  * Message Connector for UDT Datagrams.
@@ -63,7 +63,7 @@ public class NioUdtMessageConnectorChannel extends AbstractNioMessageChannel imp
     }
 
     public NioUdtMessageConnectorChannel(final Channel parent, final SocketChannelUDT channelUDT) {
-        super(parent, channelUDT, OP_READ);
+        super(parent, channelUDT, NioIoOps.READ);
         try {
             channelUDT.configureBlocking(false);
             switch (channelUDT.socketUDT().status()) {
@@ -116,8 +116,7 @@ public class NioUdtMessageConnectorChannel extends AbstractNioMessageChannel imp
         try {
             final boolean connected = SocketUtils.connect(javaChannel(), remoteAddress);
             if (!connected) {
-                selectionKey().interestOps(
-                        selectionKey().interestOps() | OP_CONNECT);
+                addAndSubmit(NioIoOps.CONNECT);
             }
             success = true;
             return connected;
@@ -136,8 +135,8 @@ public class NioUdtMessageConnectorChannel extends AbstractNioMessageChannel imp
     @Override
     protected void doFinishConnect() throws Exception {
         if (javaChannel().finishConnect()) {
-            selectionKey().interestOps(
-                    selectionKey().interestOps() & ~OP_CONNECT);
+            IoRegistration registration = registration();
+            removeAndSubmit(NioIoOps.CONNECT);
         } else {
             throw new Error(
                     "Provider error: failed to finish connect. Provider library should be upgraded.");

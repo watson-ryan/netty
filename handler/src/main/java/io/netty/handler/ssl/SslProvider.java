@@ -52,7 +52,7 @@ public enum SslProvider {
             case OPENSSL_REFCNT:
                 return OpenSsl.isAlpnSupported();
             default:
-                throw new Error("Unknown SslProvider: " + provider);
+                throw new Error("Unexpected SslProvider: " + provider);
         }
     }
 
@@ -76,7 +76,24 @@ public enum SslProvider {
             case OPENSSL_REFCNT:
                 return OpenSsl.isTlsv13Supported();
             default:
-                throw new Error("Unknown SslProvider: " + sslProvider);
+                throw new Error("Unexpected SslProvider: " + sslProvider);
+        }
+    }
+
+    /**
+     * Returns {@code true} if the specified {@link SslProvider} supports the specified {@link SslContextOption},
+     * {@code false} otherwise.
+     */
+    public static boolean isOptionSupported(SslProvider sslProvider, SslContextOption<?> option) {
+        switch (sslProvider) {
+            case JDK:
+                // We currently don't support any SslContextOptions when using the JDK implementation
+                return false;
+            case OPENSSL:
+            case OPENSSL_REFCNT:
+                return OpenSsl.isOptionSupported(option);
+            default:
+                throw new Error("Unexpected SslProvider: " + sslProvider);
         }
     }
 
@@ -92,7 +109,7 @@ public enum SslProvider {
             case OPENSSL_REFCNT:
                 return OpenSsl.isTlsv13Supported();
             default:
-                throw new Error("Unknown SslProvider: " + sslProvider);
+                throw new Error("Unexpected SslProvider: " + sslProvider);
         }
     }
 }

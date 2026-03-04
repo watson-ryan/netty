@@ -22,18 +22,19 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
-import io.netty.channel.DefaultEventLoopGroup;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.local.LocalAddress;
 import io.netty.channel.local.LocalChannel;
+import io.netty.channel.local.LocalIoHandler;
 import io.netty.channel.local.LocalServerChannel;
+import io.netty.handler.ssl.util.CachedSelfSignedCertificate;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.handler.ssl.util.SimpleTrustManagerFactory;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Promise;
 import io.netty.util.internal.EmptyArrays;
-import io.netty.util.internal.ThrowableUtil;
 
 import javax.net.ssl.ExtendedSSLSession;
 import javax.net.ssl.KeyManager;
@@ -81,9 +82,9 @@ final class SniClientJava8TestUtil {
     static void testSniClient(SslProvider sslClientProvider, SslProvider sslServerProvider, final boolean match)
             throws Exception {
         final String sniHost = "sni.netty.io";
-        SelfSignedCertificate cert = new SelfSignedCertificate();
+        SelfSignedCertificate cert = CachedSelfSignedCertificate.getCachedCertificate();
         LocalAddress address = new LocalAddress("test");
-        EventLoopGroup group = new DefaultEventLoopGroup(1);
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, LocalIoHandler.newFactory());
         SslContext sslServerContext = null;
         SslContext sslClientContext = null;
 
@@ -131,8 +132,7 @@ final class SniClientJava8TestUtil {
                                             promise.setSuccess(null);
                                         } else {
                                             promise.setFailure(
-                                                    new AssertionError("cause not of type SSLException: "
-                                                            + ThrowableUtil.stackTraceToString(cause)));
+                                                    new AssertionError("cause not of type SSLException: " + cause));
                                         }
                                     }
                                 }
@@ -163,8 +163,6 @@ final class SniClientJava8TestUtil {
 
             ReferenceCountUtil.release(sslServerContext);
             ReferenceCountUtil.release(sslClientContext);
-
-            cert.delete();
 
             group.shutdownGracefully();
         }

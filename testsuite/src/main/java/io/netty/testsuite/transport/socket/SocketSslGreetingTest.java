@@ -32,7 +32,8 @@ import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import io.netty.handler.ssl.SslProvider;
-import io.netty.handler.ssl.util.SelfSignedCertificate;
+import io.netty.pkitesting.CertificateBuilder;
+import io.netty.pkitesting.X509Bundle;
 import io.netty.util.internal.PlatformDependent;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
@@ -45,7 +46,6 @@ import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSession;
 import java.io.File;
 import java.io.IOException;
-import java.security.cert.CertificateException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -58,6 +58,7 @@ import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 
 public class SocketSslGreetingTest extends AbstractSocketTest {
@@ -69,14 +70,16 @@ public class SocketSslGreetingTest extends AbstractSocketTest {
     private static final File KEY_FILE;
 
     static {
-        SelfSignedCertificate ssc;
         try {
-            ssc = new SelfSignedCertificate();
-        } catch (CertificateException e) {
-            throw new Error(e);
+            X509Bundle cert = new CertificateBuilder()
+                    .subject("cn=localhost")
+                    .setIsCertificateAuthority(true)
+                    .buildSelfSigned();
+            CERT_FILE = cert.toTempCertChainPem();
+            KEY_FILE = cert.toTempPrivateKeyPem();
+        } catch (Exception e) {
+            throw new ExceptionInInitializerError(e);
         }
-        CERT_FILE = ssc.certificate();
-        KEY_FILE = ssc.privateKey();
     }
 
     public static Collection<Object[]> data() throws Exception {
@@ -84,13 +87,15 @@ public class SocketSslGreetingTest extends AbstractSocketTest {
         serverContexts.add(SslContextBuilder.forServer(CERT_FILE, KEY_FILE).sslProvider(SslProvider.JDK).build());
 
         List<SslContext> clientContexts = new ArrayList<SslContext>();
-        clientContexts.add(SslContextBuilder.forClient().sslProvider(SslProvider.JDK).trustManager(CERT_FILE).build());
+        clientContexts.add(SslContextBuilder.forClient().sslProvider(SslProvider.JDK)
+                .endpointIdentificationAlgorithm(null).trustManager(CERT_FILE).build());
 
         boolean hasOpenSsl = OpenSsl.isAvailable();
         if (hasOpenSsl) {
             serverContexts.add(SslContextBuilder.forServer(CERT_FILE, KEY_FILE)
                                                 .sslProvider(SslProvider.OPENSSL).build());
             clientContexts.add(SslContextBuilder.forClient().sslProvider(SslProvider.OPENSSL)
+                                                .endpointIdentificationAlgorithm(null)
                                                 .trustManager(CERT_FILE).build());
         } else {
             logger.warn("OpenSSL is unavailable and thus will not be tested.", OpenSsl.unavailabilityCause());
@@ -179,6 +184,7 @@ public class SocketSslGreetingTest extends AbstractSocketTest {
         } finally {
             if (executorService != null) {
                 executorService.shutdown();
+                assertTrue(executorService.awaitTermination(5, TimeUnit.SECONDS));
             }
         }
     }

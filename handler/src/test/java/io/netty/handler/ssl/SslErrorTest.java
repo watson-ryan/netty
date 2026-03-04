@@ -22,11 +22,13 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.logging.LogLevel;
 import io.netty.handler.logging.LoggingHandler;
+import io.netty.handler.ssl.util.CachedSelfSignedCertificate;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.handler.ssl.util.SimpleTrustManagerFactory;
@@ -117,7 +119,7 @@ public class SslErrorTest {
         // no need to run it if there is no openssl is available at all.
         OpenSsl.ensureAvailability();
 
-        SelfSignedCertificate ssc = new SelfSignedCertificate();
+        SelfSignedCertificate ssc = CachedSelfSignedCertificate.getCachedCertificate();
 
         SslContextBuilder sslServerCtxBuilder = SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey())
                 .sslProvider(serverProvider)
@@ -140,7 +142,7 @@ public class SslErrorTest {
 
         Channel serverChannel = null;
         Channel clientChannel = null;
-        EventLoopGroup group = new NioEventLoopGroup();
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
         final Promise<Void> promise = group.next().newPromise();
         try {
             serverChannel = new ServerBootstrap().group(group)

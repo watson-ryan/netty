@@ -23,9 +23,10 @@ import io.netty.channel.Channel;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.FixedRecvByteBufAllocator;
+import io.netty.channel.IoEventLoopGroup;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.socket.DatagramPacket;
-import io.netty.channel.socket.InternetProtocolFamily;
+import io.netty.channel.socket.SocketProtocolFamily;
 import io.netty.testsuite.transport.TestsuitePermutation;
 import io.netty.testsuite.transport.socket.DatagramUnicastInetTest;
 import org.junit.jupiter.api.Test;
@@ -44,7 +45,7 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 public class EpollDatagramUnicastTest extends DatagramUnicastInetTest {
     @Override
     protected List<TestsuitePermutation.BootstrapComboFactory<Bootstrap, Bootstrap>> newFactories() {
-        return EpollSocketTestPermutation.INSTANCE.datagram(InternetProtocolFamily.IPv4);
+        return EpollSocketTestPermutation.INSTANCE.datagram(SocketProtocolFamily.INET);
     }
 
     public void testSimpleSendWithConnect(Bootstrap sb, Bootstrap cb) throws Throwable {
@@ -112,11 +113,14 @@ public class EpollDatagramUnicastTest extends DatagramUnicastInetTest {
 
     private void testSegmentedDatagramPacket(Bootstrap sb, Bootstrap cb, boolean composite, boolean gro)
             throws Throwable {
-        if (!(cb.group() instanceof EpollEventLoopGroup)) {
+        if (!(cb.group() instanceof IoEventLoopGroup &&
+                ((IoEventLoopGroup) cb.group()).isIoType(EpollIoHandler.class))) {
             // Only supported for the native epoll transport.
             return;
         }
-        if (gro && !(sb.group() instanceof EpollEventLoopGroup)) {
+
+        if (gro && !(sb.group() instanceof IoEventLoopGroup) &&
+                ((IoEventLoopGroup) sb.group()).isIoType(EpollIoHandler.class)) {
             // Only supported for the native epoll transport.
             return;
         }
@@ -143,7 +147,7 @@ public class EpollDatagramUnicastTest extends DatagramUnicastInetTest {
                 // Enable GRO and also ensure we can read everything with one read as otherwise
                 // we will drop things on the floor.
                 sb.option(EpollChannelOption.UDP_GRO, true);
-                sb.option(ChannelOption.RCVBUF_ALLOCATOR, new FixedRecvByteBufAllocator(bufferCapacity));
+                sb.option(ChannelOption.RECVBUF_ALLOCATOR, new FixedRecvByteBufAllocator(bufferCapacity));
             }
             sc = sb.handler(new SimpleChannelInboundHandler<DatagramPacket>() {
                 @Override

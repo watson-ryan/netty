@@ -26,7 +26,8 @@ import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.DefaultFileRegion;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
@@ -65,27 +66,17 @@ public class FileRegionThrottleTest {
 
         tmp = PlatformDependent.createTempFile("netty-traffic", ".tmp", null);
         tmp.deleteOnExit();
-        FileOutputStream out = null;
-        try {
-            out = new FileOutputStream(tmp);
+        try (FileOutputStream out = new FileOutputStream(tmp)) {
             out.write(BYTES);
             out.flush();
         } catch (IOException e) {
             throw new RuntimeException(e);
-        } finally {
-            if (out != null) {
-                try {
-                    out.close();
-                } catch (IOException e) {
-                    // ignore
-                }
-            }
         }
     }
 
     @BeforeEach
     public void setUp() {
-        group = new NioEventLoopGroup();
+        group = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
     }
 
     @AfterEach

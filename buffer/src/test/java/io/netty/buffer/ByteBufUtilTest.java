@@ -33,12 +33,11 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.netty.buffer.Unpooled.unreleasableBuffer;
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.greaterThan;
-import static org.hamcrest.Matchers.is;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -46,9 +45,10 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class ByteBufUtilTest {
     private static final String PARAMETERIZED_NAME = "bufferType = {0}";
+    private final AdaptiveByteBufAllocator adaptiveByteBufAllocator = new AdaptiveByteBufAllocator();
 
     private enum BufferType {
-        DIRECT_UNPOOLED, DIRECT_POOLED, HEAP_POOLED, HEAP_UNPOOLED
+        DIRECT_UNPOOLED, DIRECT_POOLED, DIRECT_ADAPTIVE, HEAP_POOLED, HEAP_UNPOOLED, HEAP_ADAPTIVE
     }
 
     private ByteBuf buffer(BufferType bufferType, int capacity) {
@@ -62,8 +62,32 @@ public class ByteBufUtilTest {
             return PooledByteBufAllocator.DEFAULT.directBuffer(capacity);
         case HEAP_POOLED:
             return PooledByteBufAllocator.DEFAULT.buffer(capacity);
+        case DIRECT_ADAPTIVE:
+            return adaptiveByteBufAllocator.directBuffer(capacity);
+        case HEAP_ADAPTIVE:
+            return adaptiveByteBufAllocator.heapBuffer(capacity);
         default:
             throw new AssertionError("unexpected buffer type: " + bufferType);
+        }
+    }
+
+    private CompositeByteBuf compositeByteBuf(BufferType bufferType) {
+        switch (bufferType) {
+
+            case DIRECT_UNPOOLED:
+                return  UnpooledByteBufAllocator.DEFAULT.compositeDirectBuffer();
+            case HEAP_UNPOOLED:
+                return  UnpooledByteBufAllocator.DEFAULT.compositeHeapBuffer();
+            case DIRECT_POOLED:
+                return PooledByteBufAllocator.DEFAULT.compositeDirectBuffer();
+            case HEAP_POOLED:
+                return PooledByteBufAllocator.DEFAULT.compositeHeapBuffer();
+            case DIRECT_ADAPTIVE:
+                return adaptiveByteBufAllocator.compositeDirectBuffer();
+            case HEAP_ADAPTIVE:
+                return adaptiveByteBufAllocator.compositeHeapBuffer();
+            default:
+                throw new AssertionError("unexpected buffer type: " + bufferType);
         }
     }
 
@@ -72,7 +96,9 @@ public class ByteBufUtilTest {
                 { BufferType.DIRECT_POOLED },
                 { BufferType.DIRECT_UNPOOLED },
                 { BufferType.HEAP_POOLED },
-                { BufferType.HEAP_UNPOOLED }
+                { BufferType.HEAP_UNPOOLED },
+                { BufferType.DIRECT_ADAPTIVE },
+                { BufferType.HEAP_ADAPTIVE }
         });
     }
 
@@ -285,6 +311,72 @@ public class ByteBufUtilTest {
         buf.release();
     }
 
+    @SuppressWarnings("deprecation")
+    @ParameterizedTest(name = PARAMETERIZED_NAME)
+    @MethodSource("noUnsafe")
+    public void readUnsignedShortBE(BufferType bufferType) {
+        int shortValue = 0x1234; // unsigned short
+        int swappedShortValue = 0x3412; // swapped version of the value above
+
+        ByteBuf buf = buffer(bufferType, 2).order(ByteOrder.BIG_ENDIAN);
+        buf.writeShort(shortValue);
+        assertEquals(shortValue, ByteBufUtil.readUnsignedShortBE(buf));
+        buf.clear();
+        buf.writeShortLE(shortValue);
+        assertEquals(swappedShortValue, ByteBufUtil.readUnsignedShortBE(buf));
+        buf.release();
+
+        buf = buffer(bufferType, 2).order(ByteOrder.LITTLE_ENDIAN);
+        buf.writeShort(shortValue);
+        assertEquals(swappedShortValue, ByteBufUtil.readUnsignedShortBE(buf));
+        buf.clear();
+        buf.writeShortLE(shortValue);
+        assertEquals(swappedShortValue, ByteBufUtil.readUnsignedShortBE(buf));
+        buf.release();
+
+        shortValue = 0xfedc; // unsigned short
+        swappedShortValue = 0xdcfe; // swapped version of the value above
+
+        buf = buffer(bufferType, 2).order(ByteOrder.BIG_ENDIAN);
+        buf.writeShort(shortValue);
+        assertEquals(shortValue, ByteBufUtil.readUnsignedShortBE(buf));
+        buf.clear();
+        buf.writeShortLE(shortValue);
+        assertEquals(swappedShortValue, ByteBufUtil.readUnsignedShortBE(buf));
+        buf.release();
+
+        buf = buffer(bufferType, 2).order(ByteOrder.LITTLE_ENDIAN);
+        buf.writeShort(shortValue);
+        assertEquals(swappedShortValue, ByteBufUtil.readUnsignedShortBE(buf));
+        buf.clear();
+        buf.writeShortLE(shortValue);
+        assertEquals(swappedShortValue, ByteBufUtil.readUnsignedShortBE(buf));
+        buf.release();
+    }
+
+    @SuppressWarnings("deprecation")
+    @ParameterizedTest(name = PARAMETERIZED_NAME)
+    @MethodSource("noUnsafe")
+    public void readIntBE(BufferType bufferType) {
+        int intValue = 0x12345678;
+
+        ByteBuf buf = buffer(bufferType, 4).order(ByteOrder.BIG_ENDIAN);
+        buf.writeInt(intValue);
+        assertEquals(intValue, ByteBufUtil.readIntBE(buf));
+        buf.clear();
+        buf.writeIntLE(intValue);
+        assertEquals(ByteBufUtil.swapInt(intValue), ByteBufUtil.readIntBE(buf));
+        buf.release();
+
+        buf = buffer(bufferType, 4).order(ByteOrder.LITTLE_ENDIAN);
+        buf.writeInt(intValue);
+        assertEquals(ByteBufUtil.swapInt(intValue), ByteBufUtil.readIntBE(buf));
+        buf.clear();
+        buf.writeIntLE(intValue);
+        assertEquals(ByteBufUtil.swapInt(intValue), ByteBufUtil.readIntBE(buf));
+        buf.release();
+    }
+
     @ParameterizedTest(name = PARAMETERIZED_NAME)
     @MethodSource("noUnsafe")
     public void testWriteUsAscii(BufferType bufferType) {
@@ -338,7 +430,7 @@ public class ByteBufUtilTest {
         String usAscii = "NettyRocks";
         ByteBuf buf = buffer(bufferType, 16);
         buf.writeBytes(usAscii.getBytes(CharsetUtil.US_ASCII));
-        ByteBuf buf2 = Unpooled.compositeBuffer().addComponent(
+        ByteBuf buf2 = compositeByteBuf(bufferType).addComponent(
                 buffer(bufferType, 8)).addComponent(buffer(bufferType, 24));
         // write some byte so we start writing with an offset.
         buf2.writeByte(1);
@@ -357,7 +449,7 @@ public class ByteBufUtilTest {
         String usAscii = "NettyRocks";
         ByteBuf buf = buffer(bufferType, 16);
         buf.writeBytes(usAscii.getBytes(CharsetUtil.US_ASCII));
-        ByteBuf buf2 = new WrappedCompositeByteBuf(Unpooled.compositeBuffer().addComponent(
+        ByteBuf buf2 = new WrappedCompositeByteBuf(compositeByteBuf(bufferType).addComponent(
                 buffer(bufferType, 8)).addComponent(buffer(bufferType, 24)));
         // write some byte so we start writing with an offset.
         buf2.writeByte(1);
@@ -391,7 +483,7 @@ public class ByteBufUtilTest {
         String utf8 = "Some UTF-8 like äÄ∏ŒŒ";
         ByteBuf buf = buffer(bufferType, 16);
         buf.writeBytes(utf8.getBytes(CharsetUtil.UTF_8));
-        ByteBuf buf2 = Unpooled.compositeBuffer().addComponent(
+        ByteBuf buf2 = compositeByteBuf(bufferType).addComponent(
                 buffer(bufferType, 8)).addComponent(buffer(bufferType, 24));
         // write some byte so we start writing with an offset.
         buf2.writeByte(1);
@@ -410,7 +502,7 @@ public class ByteBufUtilTest {
         String utf8 = "Some UTF-8 like äÄ∏ŒŒ";
         ByteBuf buf = buffer(bufferType, 16);
         buf.writeBytes(utf8.getBytes(CharsetUtil.UTF_8));
-        ByteBuf buf2 = new WrappedCompositeByteBuf(Unpooled.compositeBuffer().addComponent(
+        ByteBuf buf2 = new WrappedCompositeByteBuf(compositeByteBuf(bufferType).addComponent(
                 buffer(bufferType, 8)).addComponent(buffer(bufferType, 24)));
         // write some byte so we start writing with an offset.
         buf2.writeByte(1);
@@ -617,7 +709,7 @@ public class ByteBufUtilTest {
     }
 
     private static void assertWrapped(ByteBuf buf) {
-        assertTrue(buf instanceof WrappedByteBuf);
+        assertInstanceOf(WrappedByteBuf.class, buf);
     }
 
     @ParameterizedTest(name = PARAMETERIZED_NAME)
@@ -751,7 +843,7 @@ public class ByteBufUtilTest {
     @ParameterizedTest(name = PARAMETERIZED_NAME)
     @MethodSource("noUnsafe")
     public void testToStringDoesNotThrowIndexOutOfBounds(BufferType bufferType) {
-        CompositeByteBuf buffer = Unpooled.compositeBuffer();
+        CompositeByteBuf buffer = compositeByteBuf(bufferType);
         try {
             byte[] bytes = "1234".getBytes(CharsetUtil.UTF_8);
             buffer.addComponent(buffer(bufferType, bytes.length).writeBytes(bytes));
@@ -967,8 +1059,8 @@ public class ByteBufUtilTest {
             slice.writerIndex(0);
 
             assertTrue(slice.hasArray());
-            assertThat(slice.arrayOffset(), is(1));
-            assertThat(slice.array().length, is(buf.capacity()));
+            assertEquals(1, slice.arrayOffset());
+            assertEquals(buf.capacity(), slice.array().length);
 
             checkGetBytes(slice);
         } finally {
@@ -988,8 +1080,8 @@ public class ByteBufUtilTest {
             slice.writerIndex(0);
 
             assertTrue(slice.hasArray());
-            assertThat(slice.arrayOffset(), is(0));
-            assertThat(slice.array().length, greaterThan(slice.capacity()));
+            assertEquals(0, slice.arrayOffset());
+            assertThat(slice.array().length).isGreaterThan(slice.capacity());
 
             checkGetBytes(slice);
         } finally {

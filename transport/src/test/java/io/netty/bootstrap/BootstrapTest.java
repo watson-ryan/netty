@@ -29,15 +29,19 @@ import io.netty.channel.ChannelOption;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.DefaultChannelConfig;
 import io.netty.channel.DefaultEventLoop;
-import io.netty.channel.DefaultEventLoopGroup;
+import io.netty.channel.EventLoop;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.MultithreadEventLoopGroup;
 import io.netty.channel.ServerChannel;
 import io.netty.channel.local.LocalAddress;
 import io.netty.channel.local.LocalChannel;
+import io.netty.channel.local.LocalIoHandler;
 import io.netty.channel.local.LocalServerChannel;
+import io.netty.resolver.AbstractAddressResolver;
 import io.netty.resolver.AddressResolver;
 import io.netty.resolver.AddressResolverGroup;
-import io.netty.resolver.AbstractAddressResolver;
+import io.netty.resolver.DefaultAddressResolverGroup;
 import io.netty.util.AttributeKey;
 import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.Future;
@@ -58,25 +62,24 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.Executor;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.instanceOf;
-import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.not;
-import static org.hamcrest.Matchers.nullValue;
-import static org.hamcrest.Matchers.sameInstance;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class BootstrapTest {
 
-    private static final EventLoopGroup groupA = new DefaultEventLoopGroup(1);
-    private static final EventLoopGroup groupB = new DefaultEventLoopGroup(1);
+    private static final EventLoopGroup groupA = new MultiThreadIoEventLoopGroup(1, LocalIoHandler.newFactory());
+    private static final EventLoopGroup groupB = new MultiThreadIoEventLoopGroup(1, LocalIoHandler.newFactory());
     private static final ChannelInboundHandler dummyHandler = new DummyHandler();
 
     @AfterAll
@@ -85,6 +88,29 @@ public class BootstrapTest {
         groupB.shutdownGracefully();
         groupA.terminationFuture().syncUninterruptibly();
         groupB.terminationFuture().syncUninterruptibly();
+    }
+
+    @Test
+    public void testSetOptionsThrow() {
+        final ChannelFuture cf = new Bootstrap()
+                .group(groupA)
+                .channelFactory(new ChannelFactory<Channel>() {
+                    @Override
+                    public Channel newChannel() {
+                        return new TestChannel();
+                    }
+                })
+                .option(ChannelOption.CONNECT_TIMEOUT_MILLIS, 4242)
+                .handler(new ChannelInboundHandlerAdapter())
+                .register();
+
+        assertThrows(UnsupportedOperationException.class, new  Executable() {
+            @Override
+            public void execute() throws Throwable {
+                cf.syncUninterruptibly();
+            }
+        });
+        assertFalse(cf.channel().isActive());
     }
 
     @Test
@@ -300,6 +326,24 @@ public class BootstrapTest {
     }
 
     @Test
+    void testResolverDefault() throws Exception {
+        Bootstrap bootstrap = new Bootstrap();
+
+        assertTrue(bootstrap.config().toString().contains("resolver:"));
+        assertNotNull(bootstrap.config().resolver());
+        assertEquals(DefaultAddressResolverGroup.class, bootstrap.config().resolver().getClass());
+    }
+
+    @Test
+    void testResolverDisabled() throws Exception {
+        Bootstrap bootstrap = new Bootstrap();
+        bootstrap.disableResolver();
+
+        assertFalse(bootstrap.config().toString().contains("resolver:"));
+        assertNull(bootstrap.config().resolver());
+    }
+
+    @Test
     public void testAsyncResolutionSuccess() throws Exception {
         final Bootstrap bootstrapA = new Bootstrap();
         bootstrapA.group(groupA);
@@ -311,6 +355,10 @@ public class BootstrapTest {
         bootstrapB.group(groupB);
         bootstrapB.channel(LocalServerChannel.class);
         bootstrapB.childHandler(dummyHandler);
+
+        assertTrue(bootstrapA.config().toString().contains("resolver:"));
+        assertInstanceOf(TestAddressResolverGroup.class, bootstrapA.resolver());
+
         SocketAddress localAddress = bootstrapB.bind(LocalAddress.ANY).sync().channel().localAddress();
 
         // Connect to the server using the asynchronous resolver.
@@ -335,9 +383,10 @@ public class BootstrapTest {
         ChannelFuture connectFuture = bootstrapA.connect(localAddress);
 
         // Should fail with the UnknownHostException.
-        assertThat(connectFuture.await(10000), is(true));
-        assertThat(connectFuture.cause(), is(instanceOf(UnknownHostException.class)));
-        assertThat(connectFuture.channel().isOpen(), is(false));
+        assertTrue(connectFuture.await(10000));
+        assertInstanceOf(UnknownHostException.class, connectFuture.cause());
+        connectFuture.channel().closeFuture().await(10000);
+        assertFalse(connectFuture.channel().isOpen());
     }
 
     @Test
@@ -366,10 +415,11 @@ public class BootstrapTest {
         ChannelFuture connectFuture = bootstrapA.connect(localAddress);
 
         // Should fail with the IllegalStateException.
-        assertThat(connectFuture.await(10000), is(true));
-        assertThat(connectFuture.cause(), instanceOf(IllegalStateException.class));
-        assertThat(connectFuture.cause().getCause(), instanceOf(TestException.class));
-        assertThat(connectFuture.channel().isOpen(), is(false));
+        assertTrue(connectFuture.await(10000));
+        assertInstanceOf(IllegalStateException.class, connectFuture.cause());
+        assertInstanceOf(TestException.class, connectFuture.cause().getCause());
+        connectFuture.channel().closeFuture().await(10000);
+        assertFalse(connectFuture.channel().isOpen());
     }
 
     @Test
@@ -389,9 +439,9 @@ public class BootstrapTest {
         ChannelFuture connectFuture = bootstrap.connect(LocalAddress.ANY);
 
         // Should fail with the RuntimeException.
-        assertThat(connectFuture.await(10000), is(true));
-        assertThat(connectFuture.cause(), sameInstance((Throwable) exception));
-        assertThat(connectFuture.channel(), is(not(nullValue())));
+        assertTrue(connectFuture.await(10000));
+        assertSame(exception, connectFuture.cause());
+        assertNotNull(connectFuture.channel());
     }
 
     @Test
@@ -444,6 +494,25 @@ public class BootstrapTest {
         assertSame(ChannelOption.WRITE_BUFFER_HIGH_WATER_MARK, options.take());
     }
 
+    @Test
+    void mustCallInitializerExtensions() throws Exception {
+        final Bootstrap cb = new Bootstrap();
+        cb.group(groupA);
+        cb.handler(dummyHandler);
+        cb.channel(LocalChannel.class);
+
+        StubChannelInitializerExtension.clearThreadLocals();
+
+        ChannelFuture future = cb.register();
+        future.sync();
+        final Channel expectedChannel = future.channel();
+
+        assertSame(expectedChannel, StubChannelInitializerExtension.lastSeenClientChannel.get());
+        assertNull(StubChannelInitializerExtension.lastSeenChildChannel.get());
+        assertNull(StubChannelInitializerExtension.lastSeenListenerChannel.get());
+        expectedChannel.close().sync();
+    }
+
     private static final class DelayedEventLoopGroup extends DefaultEventLoop {
         @Override
         public ChannelFuture register(final Channel channel, final ChannelPromise promise) {
@@ -458,12 +527,12 @@ public class BootstrapTest {
         }
     }
 
-    private static final class TestEventLoopGroup extends DefaultEventLoopGroup {
+    private static final class TestEventLoopGroup extends MultithreadEventLoopGroup {
 
         ChannelPromise promise;
 
         TestEventLoopGroup() {
-            super(1);
+            super(1, (ThreadFactory) null);
         }
 
         @Override
@@ -481,6 +550,11 @@ public class BootstrapTest {
         @Override
         public ChannelFuture register(Channel channel, final ChannelPromise promise) {
             throw new UnsupportedOperationException();
+        }
+
+        @Override
+        protected EventLoop newChild(Executor executor, Object... args) throws Exception {
+            return new DefaultEventLoop(executor);
         }
     }
 
@@ -537,4 +611,5 @@ public class BootstrapTest {
             };
         }
     }
+
 }

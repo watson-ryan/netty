@@ -21,8 +21,6 @@ import java.util.Collections;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.channel.ChannelDuplexHandler;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
@@ -33,7 +31,10 @@ import io.netty.handler.codec.http.HttpServerUpgradeHandler.UpgradeCodecFactory;
 import io.netty.util.CharsetUtil;
 import io.netty.util.ReferenceCountUtil;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -113,12 +114,7 @@ public class HttpServerUpgradeHandlerTest {
                         ctx.write(msg, promise);
                     }
                 });
-                promise.addListener(new ChannelFutureListener() {
-                    @Override
-                    public void operationComplete(ChannelFuture future) {
-                        writeFlushed = true;
-                    }
-                });
+                promise.addListener(future -> writeFlushed = true);
             }
         };
 
@@ -179,7 +175,7 @@ public class HttpServerUpgradeHandlerTest {
         assertNull(channel.pipeline().get("marker"));
 
         HttpRequest req = channel.readInbound();
-        assertFalse(req instanceof FullHttpRequest); // Should not be aggregated.
+        assertThat(req).isNotInstanceOf(FullHttpRequest.class); // Should not be aggregated.
         assertTrue(req.headers().contains(HttpHeaderNames.CONNECTION, "Upgrade", false));
         assertTrue(req.headers().contains(HttpHeaderNames.UPGRADE, "do-not-upgrade", false));
         assertTrue(channel.readInbound() instanceof LastHttpContent);
@@ -191,8 +187,53 @@ public class HttpServerUpgradeHandlerTest {
         assertFalse(channel.finishAndReleaseAll());
     }
 
+    @ParameterizedTest
+    @ValueSource(booleans = { true, false })
+    public void upgradeFail(boolean removeAfterFirst) {
+        final HttpServerCodec httpServerCodec = new HttpServerCodec();
+        final UpgradeCodecFactory factory = new UpgradeCodecFactory() {
+            @Override
+            public UpgradeCodec newUpgradeCodec(CharSequence protocol) {
+                return new TestUpgradeCodec();
+            }
+        };
+
+        HttpServerUpgradeHandler upgradeHandler = new HttpServerUpgradeHandler(httpServerCodec, factory, 0,
+                DefaultHttpHeadersFactory.headersFactory(), DefaultHttpHeadersFactory.trailersFactory(),
+                removeAfterFirst);
+
+        EmbeddedChannel channel = new EmbeddedChannel(httpServerCodec, upgradeHandler);
+
+        // Build a h2c upgrade request, but without connection header.
+        String upgradeString = "GET / HTTP/1.1\r\n" +
+                               "Host: example.com\r\n" +
+                               "Upgrade: h2c\r\n\r\n";
+        ByteBuf upgrade = Unpooled.copiedBuffer(upgradeString, CharsetUtil.US_ASCII);
+
+        assertTrue(channel.writeInbound(upgrade));
+        assertNotNull(channel.pipeline().get(HttpServerCodec.class));
+        if (removeAfterFirst) {
+            assertNull(channel.pipeline().get(HttpServerUpgradeHandler.class)); // Should be removed.
+        } else {
+            assertNotNull(channel.pipeline().get(HttpServerUpgradeHandler.class)); // Should not be removed.
+        }
+        assertNull(channel.pipeline().get("marker"));
+
+        HttpRequest req = channel.readInbound();
+        assertEquals(HttpVersion.HTTP_1_1, req.protocolVersion());
+        assertTrue(req.headers().contains(HttpHeaderNames.UPGRADE, "h2c", false));
+        assertFalse(req.headers().contains(HttpHeaderNames.CONNECTION));
+        ReferenceCountUtil.release(req);
+        assertNull(channel.readInbound());
+
+        // No response should be written because we're just passing through.
+        channel.flushOutbound();
+        assertNull(channel.readOutbound());
+        assertFalse(channel.finishAndReleaseAll());
+    }
+
     @Test
-    public void upgradeFail() {
+    public void upgradeExpect() {
         final HttpServerCodec httpServerCodec = new HttpServerCodec();
         final UpgradeCodecFactory factory = new UpgradeCodecFactory() {
             @Override
@@ -207,25 +248,39 @@ public class HttpServerUpgradeHandlerTest {
 
         // Build a h2c upgrade request, but without connection header.
         String upgradeString = "GET / HTTP/1.1\r\n" +
-                               "Host: example.com\r\n" +
-                               "Upgrade: h2c\r\n\r\n";
+                "Expect: foo\r\n" +
+                "Upgrade: h2c\r\n" +
+                "\r\n" +
+                "GET / HTTP/1.1\r\n" +
+                "Content-Length: 0\r\n" +
+                "\r\n";
         ByteBuf upgrade = Unpooled.copiedBuffer(upgradeString, CharsetUtil.US_ASCII);
 
         assertTrue(channel.writeInbound(upgrade));
-        assertNotNull(channel.pipeline().get(HttpServerCodec.class));
-        assertNotNull(channel.pipeline().get(HttpServerUpgradeHandler.class)); // Should not be removed.
-        assertNull(channel.pipeline().get("marker"));
+        channel.checkException();
+        assertTrue(channel.finishAndReleaseAll());
+    }
 
-        HttpRequest req = channel.readInbound();
-        assertEquals(HttpVersion.HTTP_1_1, req.protocolVersion());
-        assertTrue(req.headers().contains(HttpHeaderNames.UPGRADE, "h2c", false));
-        assertFalse(req.headers().contains(HttpHeaderNames.CONNECTION));
-        ReferenceCountUtil.release(req);
-        assertNull(channel.readInbound());
+    @Test
+    public void upgradePrematureClose() throws Exception {
+        final HttpServerCodec httpServerCodec = new HttpServerCodec();
+        final UpgradeCodecFactory factory = new UpgradeCodecFactory() {
+            @Override
+            public UpgradeCodec newUpgradeCodec(CharSequence protocol) {
+                return new TestUpgradeCodec();
+            }
+        };
 
-        // No response should be written because we're just passing through.
-        channel.flushOutbound();
-        assertNull(channel.readOutbound());
-        assertFalse(channel.finishAndReleaseAll());
+        HttpServerUpgradeHandler upgradeHandler = new HttpServerUpgradeHandler(httpServerCodec, factory);
+
+        EmbeddedChannel channel = new EmbeddedChannel(httpServerCodec, upgradeHandler);
+
+        channel.writeInbound(Unpooled.copiedBuffer("POST / HTTP/1.1\n" +
+                "Upgrade:\n" +
+                "Expect:\n" +
+                "Content-Length: 8\n" +
+                "\n" +
+                "GET / HTTP/1.1\n", CharsetUtil.US_ASCII));
+        assertTrue(channel.finishAndReleaseAll());
     }
 }

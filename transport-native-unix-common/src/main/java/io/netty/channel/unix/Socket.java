@@ -17,6 +17,7 @@ package io.netty.channel.unix;
 
 import io.netty.channel.ChannelException;
 import io.netty.channel.socket.InternetProtocolFamily;
+import io.netty.channel.socket.SocketProtocolFamily;
 import io.netty.util.CharsetUtil;
 import io.netty.util.NetUtil;
 
@@ -38,6 +39,7 @@ import static io.netty.channel.unix.Errors.ioResult;
 import static io.netty.channel.unix.Errors.newIOException;
 import static io.netty.channel.unix.NativeInetAddress.address;
 import static io.netty.channel.unix.NativeInetAddress.ipv4MappedIpv6Address;
+import static io.netty.util.internal.StringUtil.className;
 
 /**
  * Provides a JNI bridge to native socket operations.
@@ -345,7 +347,7 @@ public class Socket extends FileDescriptor {
             DomainSocketAddress unixDomainSocketAddress = (DomainSocketAddress) socketAddress;
             res = connectDomainSocket(fd, unixDomainSocketAddress.path().getBytes(CharsetUtil.UTF_8));
         } else {
-            throw new Error("Unexpected SocketAddress implementation " + socketAddress);
+            throw new Error("Unexpected SocketAddress implementation: " + className(socketAddress));
         }
         if (res < 0) {
             return handleConnectErrno("connect", res);
@@ -384,7 +386,7 @@ public class Socket extends FileDescriptor {
                 throw newIOException("bind", res);
             }
         } else {
-            throw new Error("Unexpected SocketAddress implementation " + socketAddress);
+            throw new Error("Unexpected SocketAddress implementation: " + className(socketAddress));
         }
     }
 
@@ -414,11 +416,21 @@ public class Socket extends FileDescriptor {
         return addr == null ? null : address(addr, 0, addr.length);
     }
 
+    public final DomainSocketAddress remoteDomainSocketAddress() {
+        byte[] addr = remoteDomainSocketAddress(fd);
+        return addr == null ? null : new DomainSocketAddress(new String(addr));
+    }
+
     public final InetSocketAddress localAddress() {
         byte[] addr = localAddress(fd);
         // addr may be null if getpeername failed.
         // See https://github.com/netty/netty/issues/3328
         return addr == null ? null : address(addr, 0, addr.length);
+    }
+
+    public final DomainSocketAddress localDomainSocketAddress() {
+        byte[] addr = localDomainSocketAddress(fd);
+        return addr == null ? null : new DomainSocketAddress(new String(addr));
     }
 
     public final int getReceiveBufferSize() throws IOException {
@@ -538,9 +550,18 @@ public class Socket extends FileDescriptor {
         return isIpv6Preferred;
     }
 
+    /**
+     * @deprecated use {{@link #shouldUseIpv6(SocketProtocolFamily)}}
+     */
+    @Deprecated
     public static boolean shouldUseIpv6(InternetProtocolFamily family) {
         return family == null ? isIPv6Preferred() :
                         family == InternetProtocolFamily.IPv6;
+    }
+
+    public static boolean shouldUseIpv6(SocketProtocolFamily family) {
+        return family == null ? isIPv6Preferred() :
+                family == SocketProtocolFamily.INET6;
     }
 
     private static native boolean isIPv6Preferred0(boolean ipv4Preferred);
@@ -578,7 +599,17 @@ public class Socket extends FileDescriptor {
         return newSocketStream0(isIPv6Preferred());
     }
 
+    /**
+     * @deprecated use {@link #newSocketStream0(SocketProtocolFamily)}
+     * @param protocol
+     * @return
+     */
+    @Deprecated
     protected static int newSocketStream0(InternetProtocolFamily protocol) {
+        return newSocketStream0(shouldUseIpv6(protocol));
+    }
+
+    protected static int newSocketStream0(SocketProtocolFamily protocol) {
         return newSocketStream0(shouldUseIpv6(protocol));
     }
 
@@ -594,8 +625,19 @@ public class Socket extends FileDescriptor {
         return newSocketDgram0(isIPv6Preferred());
     }
 
+    /**
+     * @deprecated use {@link #newSocketDgram0(SocketProtocolFamily)}
+     */
+    @Deprecated
     protected static int newSocketDgram0(InternetProtocolFamily family) {
         return newSocketDgram0(shouldUseIpv6(family));
+    }
+
+    protected static int newSocketDgram0(SocketProtocolFamily family) {
+        if (family == null || family == SocketProtocolFamily.INET || family == SocketProtocolFamily.INET6) {
+            return newSocketDgram0(shouldUseIpv6(family));
+        }
+        throw new IllegalArgumentException("SocketProtocolFamily must be either INET or INET6: " + family);
     }
 
     protected static int newSocketDgram0(boolean ipv6) {
@@ -633,7 +675,9 @@ public class Socket extends FileDescriptor {
     private static native int accept(int fd, byte[] addr);
 
     private static native byte[] remoteAddress(int fd);
+    private static native byte[] remoteDomainSocketAddress(int fd);
     private static native byte[] localAddress(int fd);
+    private static native byte[] localDomainSocketAddress(int fd);
 
     private static native int send(int fd, ByteBuffer buf, int pos, int limit);
     private static native int sendAddress(int fd, long address, int pos, int limit);

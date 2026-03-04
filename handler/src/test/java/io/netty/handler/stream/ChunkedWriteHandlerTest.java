@@ -58,23 +58,15 @@ public class ChunkedWriteHandlerTest {
             BYTES[i] = (byte) i;
         }
 
-        FileOutputStream out = null;
         try {
             TMP = PlatformDependent.createTempFile("netty-chunk-", ".tmp", null);
             TMP.deleteOnExit();
-            out = new FileOutputStream(TMP);
-            out.write(BYTES);
-            out.flush();
+            try (FileOutputStream out = new FileOutputStream(TMP)) {
+                out.write(BYTES);
+                out.flush();
+            }
         } catch (IOException e) {
             throw new RuntimeException(e);
-        } finally {
-            if (out != null) {
-                try {
-                    out.close();
-                } catch (IOException e) {
-                    // ignore
-                }
-            }
         }
     }
 
@@ -205,13 +197,7 @@ public class ChunkedWriteHandlerTest {
         };
 
         final AtomicBoolean listenerNotified = new AtomicBoolean(false);
-        final ChannelFutureListener listener = new ChannelFutureListener() {
-
-            @Override
-            public void operationComplete(ChannelFuture future) throws Exception {
-                listenerNotified.set(true);
-            }
-        };
+        final ChannelFutureListener listener = future -> listenerNotified.set(true);
 
         EmbeddedChannel ch = new EmbeddedChannel(new ChunkedWriteHandler());
         ch.writeAndFlush(input).addListener(listener).syncUninterruptibly();
@@ -529,12 +515,9 @@ public class ChunkedWriteHandlerTest {
         final CountDownLatch listenerInvoked = new CountDownLatch(1);
 
         ChannelFuture writeFuture = ch.write(input);
-        writeFuture.addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) {
-                inputClosedWhenListenerInvoked.set(input.isClosed());
-                listenerInvoked.countDown();
-            }
+        writeFuture.addListener(future -> {
+            inputClosedWhenListenerInvoked.set(input.isClosed());
+            listenerInvoked.countDown();
         });
         ch.flush();
 
@@ -553,12 +536,9 @@ public class ChunkedWriteHandlerTest {
         final CountDownLatch listenerInvoked = new CountDownLatch(1);
 
         ChannelFuture writeFuture = ch.write(input);
-        writeFuture.addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) {
-                inputClosedWhenListenerInvoked.set(input.isClosed());
-                listenerInvoked.countDown();
-            }
+        writeFuture.addListener(future -> {
+            inputClosedWhenListenerInvoked.set(input.isClosed());
+            listenerInvoked.countDown();
         });
         ch.flush();
 
@@ -578,12 +558,9 @@ public class ChunkedWriteHandlerTest {
         final CountDownLatch listenerInvoked = new CountDownLatch(1);
 
         ChannelFuture writeFuture = ch.write(input);
-        writeFuture.addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) {
-                inputClosedWhenListenerInvoked.set(input.isClosed());
-                listenerInvoked.countDown();
-            }
+        writeFuture.addListener(future -> {
+            inputClosedWhenListenerInvoked.set(input.isClosed());
+            listenerInvoked.countDown();
         });
         ch.close(); // close channel to make handler discard the input on subsequent flush
         ch.flush();
@@ -653,12 +630,9 @@ public class ChunkedWriteHandlerTest {
         final CountDownLatch listenerInvoked = new CountDownLatch(1);
 
         ChannelFuture writeFuture = ch.write(input);
-        writeFuture.addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) {
-                inputClosedWhenListenerInvoked.set(input.isClosed());
-                listenerInvoked.countDown();
-            }
+        writeFuture.addListener(future -> {
+            inputClosedWhenListenerInvoked.set(input.isClosed());
+            listenerInvoked.countDown();
         });
         ch.close(); // close channel to make handler discard the input on subsequent flush
         ch.flush();

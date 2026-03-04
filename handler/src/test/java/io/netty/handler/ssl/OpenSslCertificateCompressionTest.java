@@ -22,15 +22,17 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.local.LocalAddress;
 import io.netty.channel.local.LocalChannel;
-import io.netty.channel.local.LocalEventLoopGroup;
+import io.netty.channel.local.LocalIoHandler;
 import io.netty.channel.local.LocalServerChannel;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.internal.tcnative.CertificateCompressionAlgo;
 import io.netty.util.concurrent.Promise;
+import io.netty.util.ReferenceCountUtil;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
@@ -71,7 +73,7 @@ public class OpenSslCertificateCompressionTest {
 
     @Test
     public void testSimple() throws Throwable {
-        assumeTrue(OpenSsl.isBoringSSL());
+        assumeTrue(OpenSsl.isBoringSSL() || OpenSsl.isAWSLC());
         final SslContext clientSslContext = buildClientContext(
                 OpenSslCertificateCompressionConfig.newBuilder()
                         .addAlgorithm(testBrotliAlgoClient,
@@ -92,7 +94,7 @@ public class OpenSslCertificateCompressionTest {
 
     @Test
     public void testServerPriority() throws Throwable {
-        assumeTrue(OpenSsl.isBoringSSL());
+        assumeTrue(OpenSsl.isBoringSSL() || OpenSsl.isAWSLC());
         final SslContext clientSslContext = buildClientContext(
                 OpenSslCertificateCompressionConfig.newBuilder()
                         .addAlgorithm(testBrotliAlgoClient,
@@ -116,7 +118,7 @@ public class OpenSslCertificateCompressionTest {
 
     @Test
     public void testServerPriorityReverse() throws Throwable {
-        assumeTrue(OpenSsl.isBoringSSL());
+        assumeTrue(OpenSsl.isBoringSSL() || OpenSsl.isAWSLC());
         final SslContext clientSslContext = buildClientContext(
                 OpenSslCertificateCompressionConfig.newBuilder()
                         .addAlgorithm(testBrotliAlgoClient,
@@ -141,7 +143,7 @@ public class OpenSslCertificateCompressionTest {
 
     @Test
     public void testFailedNegotiation() throws Throwable {
-        assumeTrue(OpenSsl.isBoringSSL());
+        assumeTrue(OpenSsl.isBoringSSL() || OpenSsl.isAWSLC());
         final SslContext clientSslContext = buildClientContext(
                 OpenSslCertificateCompressionConfig.newBuilder()
                         .addAlgorithm(testBrotliAlgoClient,
@@ -162,7 +164,7 @@ public class OpenSslCertificateCompressionTest {
 
     @Test
     public void testAlgoFailure() throws Throwable {
-        assumeTrue(OpenSsl.isBoringSSL());
+        assumeTrue(OpenSsl.isBoringSSL() || OpenSsl.isAWSLC());
         TestCertCompressionAlgo badZlibAlgoClient =
                 new TestCertCompressionAlgo(CertificateCompressionAlgo.TLS_EXT_CERT_COMPRESSION_ZLIB) {
             @Override
@@ -191,7 +193,7 @@ public class OpenSslCertificateCompressionTest {
 
     @Test
     public void testAlgoException() throws Throwable {
-        assumeTrue(OpenSsl.isBoringSSL());
+        assumeTrue(OpenSsl.isBoringSSL() || OpenSsl.isAWSLC());
         TestCertCompressionAlgo badZlibAlgoClient =
                 new TestCertCompressionAlgo(CertificateCompressionAlgo.TLS_EXT_CERT_COMPRESSION_ZLIB) {
                     @Override
@@ -220,7 +222,7 @@ public class OpenSslCertificateCompressionTest {
 
     @Test
     public void testTlsLessThan13() throws Throwable {
-        assumeTrue(OpenSsl.isBoringSSL());
+        assumeTrue(OpenSsl.isBoringSSL() || OpenSsl.isAWSLC());
         final SslContext clientSslContext = SslContextBuilder.forClient()
              .sslProvider(SslProvider.OPENSSL)
              .protocols(SslProtocols.TLS_v1_2)
@@ -251,7 +253,7 @@ public class OpenSslCertificateCompressionTest {
     @Test
     public void testDuplicateAdd() throws Throwable {
         // Fails with "Failed trying to add certificate compression algorithm"
-        assumeTrue(OpenSsl.isBoringSSL());
+        assumeTrue(OpenSsl.isBoringSSL() || OpenSsl.isAWSLC());
         Assertions.assertThrows(Exception.class, new Executable() {
             @Override
             public void execute() throws Throwable {
@@ -283,7 +285,7 @@ public class OpenSslCertificateCompressionTest {
     @Test
     public void testNotBoringAdd() throws Throwable {
         // Fails with "TLS Cert Compression only supported by BoringSSL"
-        assumeTrue(!OpenSsl.isBoringSSL());
+        assumeTrue(!OpenSsl.isBoringSSL() && !OpenSsl.isAWSLC());
         Assertions.assertThrows(Exception.class, new Executable() {
             @Override
             public void execute() throws Throwable {
@@ -310,7 +312,7 @@ public class OpenSslCertificateCompressionTest {
     }
 
     public void runCertCompressionTest(SslContext clientSslContext, SslContext serverSslContext) throws Throwable {
-        EventLoopGroup group = new LocalEventLoopGroup();
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(LocalIoHandler.newFactory());
         Promise<Object> clientPromise = group.next().newPromise();
         Promise<Object> serverPromise = group.next().newPromise();
         try {
@@ -334,6 +336,8 @@ public class OpenSslCertificateCompressionTest {
             serverChannel.close().syncUninterruptibly();
         } finally  {
             group.shutdownGracefully();
+            ReferenceCountUtil.release(clientSslContext);
+            ReferenceCountUtil.release(serverSslContext);
         }
     }
 

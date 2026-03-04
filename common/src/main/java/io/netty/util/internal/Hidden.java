@@ -35,7 +35,6 @@ class Hidden {
      * and SHOULD NOT be considered a public API.
      */
     @UnstableApi
-    @SuppressJava6Requirement(reason = "BlockHound is Java 8+, but this class is only loaded by it's SPI")
     public static final class NettyBlockHoundIntegration implements BlockHoundIntegration {
 
         @Override
@@ -96,6 +95,16 @@ class Hidden {
             );
 
             builder.allowBlockingCallsInside(
+                    "io.netty.buffer.AdaptivePoolingAllocator$1",
+                    "initialValue"
+            );
+
+            builder.allowBlockingCallsInside(
+                    "io.netty.buffer.AdaptivePoolingAllocator$1",
+                    "onRemoval"
+            );
+
+            builder.allowBlockingCallsInside(
                     "io.netty.handler.ssl.SslHandler",
                     "handshake"
             );
@@ -115,6 +124,10 @@ class Hidden {
             builder.allowBlockingCallsInside(
                     "io.netty.util.concurrent.GlobalEventExecutor",
                     "addTask");
+
+            builder.allowBlockingCallsInside(
+                    "io.netty.util.concurrent.SingleThreadEventExecutor",
+                    "pollTaskFrom");
 
             builder.allowBlockingCallsInside(
                     "io.netty.util.concurrent.SingleThreadEventExecutor",
@@ -162,13 +175,15 @@ class Hidden {
                     "io.netty.util.NetUtil$SoMaxConnAction",
                     "run");
 
+            builder.allowBlockingCallsInside("io.netty.util.internal.ReferenceCountUpdater",
+                    "retryRelease0");
+
             builder.allowBlockingCallsInside("io.netty.util.internal.PlatformDependent", "createTempFile");
             builder.nonBlockingThreadPredicate(new Function<Predicate<Thread>, Predicate<Thread>>() {
                 @Override
                 public Predicate<Thread> apply(final Predicate<Thread> p) {
                     return new Predicate<Thread>() {
                         @Override
-                        @SuppressJava6Requirement(reason = "Predicate#test")
                         public boolean test(Thread thread) {
                             return p.test(thread) ||
                                     thread instanceof FastThreadLocalThread &&

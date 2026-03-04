@@ -25,20 +25,20 @@ import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
-import io.netty.channel.DefaultEventLoopGroup;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.local.LocalAddress;
 import io.netty.channel.local.LocalChannel;
+import io.netty.channel.local.LocalIoHandler;
 import io.netty.channel.local.LocalServerChannel;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
-import io.netty.handler.ssl.util.SelfSignedCertificate;
+import io.netty.pkitesting.CertificateBuilder;
+import io.netty.pkitesting.X509Bundle;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.ImmediateEventExecutor;
 import io.netty.util.concurrent.Promise;
-import io.netty.util.internal.ThreadLocalRandom;
-import org.hamcrest.Matchers;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.params.ParameterizedTest;
@@ -59,15 +59,14 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.Executor;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static io.netty.handler.ssl.OpenSslTestUtils.checkShouldUseKeyManagerFactory;
-import static org.hamcrest.MatcherAssert.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
@@ -75,8 +74,8 @@ import static org.junit.jupiter.api.Assumptions.assumeTrue;
 public class OpenSslPrivateKeyMethodTest {
     private static final String RFC_CIPHER_NAME = "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256";
     private static EventLoopGroup GROUP;
-    private static SelfSignedCertificate CERT;
-    private static ExecutorService EXECUTOR;
+    private static X509Bundle CERT;
+    private static DelayingExecutor EXECUTOR;
 
     static Collection<Object[]> parameters() {
         List<Object[]> dst = new ArrayList<Object[]>();
@@ -94,15 +93,19 @@ public class OpenSslPrivateKeyMethodTest {
     public static void init() throws Exception {
         checkShouldUseKeyManagerFactory();
 
-        assumeTrue(OpenSsl.isBoringSSL());
+        assumeTrue(OpenSsl.isBoringSSL() || OpenSsl.isAWSLC());
         // Check if the cipher is supported at all which may not be the case for various JDK versions and OpenSSL API
         // implementations.
         assumeCipherAvailable(SslProvider.OPENSSL);
         assumeCipherAvailable(SslProvider.JDK);
 
-        GROUP = new DefaultEventLoopGroup();
-        CERT = new SelfSignedCertificate();
-        EXECUTOR = Executors.newCachedThreadPool(new ThreadFactory() {
+        GROUP = new MultiThreadIoEventLoopGroup(LocalIoHandler.newFactory());
+        CERT = new CertificateBuilder()
+                .rsa2048()
+                .subject("cn=localhost")
+                .setIsCertificateAuthority(true)
+                .buildSelfSigned();
+        EXECUTOR = new DelayingExecutor(new ThreadFactory() {
             @Override
             public Thread newThread(Runnable r) {
                 return new DelegateThread(r);
@@ -111,11 +114,10 @@ public class OpenSslPrivateKeyMethodTest {
     }
 
     @AfterAll
-    public static void destroy() {
-        if (OpenSsl.isBoringSSL()) {
-            GROUP.shutdownGracefully();
-            CERT.delete();
-            EXECUTOR.shutdown();
+    public static void destroy() throws InterruptedException {
+        if (OpenSsl.isBoringSSL() || OpenSsl.isAWSLC()) {
+            GROUP.shutdownGracefully().sync();
+            assertTrue(EXECUTOR.shutdownAndAwaitTermination(5, TimeUnit.SECONDS));
         }
     }
 
@@ -146,7 +148,7 @@ public class OpenSslPrivateKeyMethodTest {
     private SslContext buildServerContext(OpenSslPrivateKeyMethod method) throws Exception {
         List<String> ciphers = Collections.singletonList(RFC_CIPHER_NAME);
 
-        final KeyManagerFactory kmf = OpenSslX509KeyManagerFactory.newKeyless(CERT.cert());
+        final KeyManagerFactory kmf = OpenSslX509KeyManagerFactory.newKeyless(CERT.getCertificatePath());
 
         return SslContextBuilder.forServer(kmf)
                 .sslProvider(SslProvider.OPENSSL)
@@ -173,7 +175,7 @@ public class OpenSslPrivateKeyMethodTest {
     private SslContext buildServerContext(OpenSslAsyncPrivateKeyMethod method) throws Exception {
         List<String> ciphers = Collections.singletonList(RFC_CIPHER_NAME);
 
-        final KeyManagerFactory kmf = OpenSslX509KeyManagerFactory.newKeyless(CERT.cert());
+        final KeyManagerFactory kmf = OpenSslX509KeyManagerFactory.newKeyless(CERT.getCertificatePath());
 
         return SslContextBuilder.forServer(kmf)
                 .sslProvider(SslProvider.OPENSSL)
@@ -200,7 +202,7 @@ public class OpenSslPrivateKeyMethodTest {
                 signCalled.set(true);
                 assertThread(delegate);
 
-                assertEquals(CERT.cert().getPublicKey(),
+                assertEquals(CERT.getKeyPair().getPublic(),
                         engine.getSession().getLocalCertificates()[0].getPublicKey());
 
                 // Delegate signing to Java implementation.
@@ -215,7 +217,7 @@ public class OpenSslPrivateKeyMethodTest {
                 } else {
                     throw new AssertionError("Unexpected signature algorithm " + signatureAlgorithm);
                 }
-                signature.initSign(CERT.key());
+                signature.initSign(CERT.getKeyPair().getPrivate());
                 signature.update(input);
                 return signature.sign();
             }
@@ -372,7 +374,7 @@ public class OpenSslPrivateKeyMethodTest {
                         Throwable clientCause = clientSslHandler.handshakeFuture().await().cause();
                         Throwable serverCause = serverSslHandler.handshakeFuture().await().cause();
                         assertNotNull(clientCause);
-                        assertThat(serverCause, Matchers.instanceOf(SSLHandshakeException.class));
+                        assertInstanceOf(SSLHandshakeException.class, serverCause);
                     } finally {
                         client.close().sync();
                     }

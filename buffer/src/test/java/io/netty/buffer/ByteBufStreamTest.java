@@ -21,8 +21,9 @@ import org.junit.jupiter.api.function.Executable;
 import java.io.EOFException;
 import java.io.IOException;
 import java.nio.charset.Charset;
+import java.nio.charset.StandardCharsets;
 
-import static io.netty.util.internal.EmptyArrays.*;
+import static io.netty.util.internal.EmptyArrays.EMPTY_BYTES;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
@@ -48,8 +49,9 @@ public class ByteBufStreamTest {
             // Expected
         }
 
-        ByteBufOutputStream out = new ByteBufOutputStream(buf);
-        try {
+        assertThrows(IndexOutOfBoundsException.class, () -> new ByteBufOutputStream(buf).write(EMPTY_BYTES, -1, 0));
+
+        try (ByteBufOutputStream out = new ByteBufOutputStream(buf)) {
             assertSame(buf, out.buffer());
             out.writeBoolean(true);
             out.writeBoolean(false);
@@ -69,8 +71,6 @@ public class ByteBufStreamTest {
             out.write(EMPTY_BYTES);
             out.write(new byte[]{1, 2, 3, 4});
             out.write(new byte[]{1, 3, 3, 4}, 0, 0);
-        } finally {
-            out.close();
         }
 
         try {
@@ -121,7 +121,7 @@ public class ByteBufStreamTest {
 
             byte[] tmp = new byte[13];
             in.readFully(tmp);
-            assertEquals("Hello, World!", new String(tmp, "ISO-8859-1"));
+            assertEquals("Hello, World!", new String(tmp, StandardCharsets.ISO_8859_1));
 
             assertEquals('H', in.readChar());
             assertEquals('e', in.readChar());
@@ -190,7 +190,7 @@ public class ByteBufStreamTest {
 
     @Test
     public void testReadLine() throws Exception {
-        Charset utf8 = Charset.forName("UTF-8");
+        Charset utf8 = StandardCharsets.UTF_8;
         ByteBuf buf = Unpooled.buffer();
         ByteBufInputStream in = new ByteBufInputStream(buf, true);
 
@@ -232,33 +232,29 @@ public class ByteBufStreamTest {
         ByteBuf buf = Unpooled.buffer(16);
         buf.writeBytes(new byte[]{1, 2, 3, 4, 5, 6});
 
-        ByteBufInputStream in = new ByteBufInputStream(buf, 3);
-
-        assertEquals(1, in.read());
-        assertEquals(2, in.read());
-        assertEquals(3, in.read());
-        assertEquals(-1, in.read());
-        assertEquals(-1, in.read());
-        assertEquals(-1, in.read());
-
-        buf.release();
-        in.close();
+        try (ByteBufInputStream in = new ByteBufInputStream(buf, 3)) {
+            assertEquals(1, in.read());
+            assertEquals(2, in.read());
+            assertEquals(3, in.read());
+            assertEquals(-1, in.read());
+            assertEquals(-1, in.read());
+            assertEquals(-1, in.read());
+            buf.release();
+        }
 
         // case2
         ByteBuf buf2 = Unpooled.buffer(16);
         buf2.writeBytes(new byte[]{1, 2, 3, 4, 5, 6});
 
-        ByteBufInputStream in2 = new ByteBufInputStream(buf2, 4);
-
-        assertEquals(1, in2.read());
-        assertEquals(2, in2.read());
-        assertEquals(3, in2.read());
-        assertEquals(4, in2.read());
-        assertNotEquals(5, in2.read());
-        assertEquals(-1, in2.read());
-
-        buf2.release();
-        in2.close();
+        try (ByteBufInputStream in2 = new ByteBufInputStream(buf2, 4)) {
+            assertEquals(1, in2.read());
+            assertEquals(2, in2.read());
+            assertEquals(3, in2.read());
+            assertEquals(4, in2.read());
+            assertNotEquals(5, in2.read());
+            assertEquals(-1, in2.read());
+            buf2.release();
+        }
     }
 
     @Test
@@ -267,11 +263,10 @@ public class ByteBufStreamTest {
         ByteBuf buf = Unpooled.buffer(16);
         buf.writeBytes(new byte[] { 1, 2, 3, 4, 5, 6 });
 
-        ByteBufInputStream in = new ByteBufInputStream(buf, 0);
-
-        assertNull(in.readLine());
-        buf.release();
-        in.close();
+        try (ByteBufInputStream in = new ByteBufInputStream(buf, 0)) {
+            assertNull(in.readLine());
+            buf.release();
+        }
     }
 
     @Test
@@ -279,13 +274,12 @@ public class ByteBufStreamTest {
         ByteBuf buf2 = Unpooled.buffer(16);
         buf2.writeBytes(new byte[] { 'A', 'B', '\n', 'C', 'E', 'F'});
 
-        ByteBufInputStream in2 = new ByteBufInputStream(buf2, 4);
-
-        assertEquals("AB", in2.readLine());
-        assertEquals("C", in2.readLine());
-        assertNull(in2.readLine());
-        buf2.release();
-        in2.close();
+        try (ByteBufInputStream in2 = new ByteBufInputStream(buf2, 4)) {
+            assertEquals("AB", in2.readLine());
+            assertEquals("C", in2.readLine());
+            assertNull(in2.readLine());
+            buf2.release();
+        }
     }
 
     @Test
@@ -294,8 +288,7 @@ public class ByteBufStreamTest {
         ByteBuf buf = Unpooled.buffer(16);
         buf.writeBytes(new byte[] { 1, 2, 3, 4, 5, 6 });
 
-        final ByteBufInputStream in = new ByteBufInputStream(buf, 0);
-        try {
+        try (ByteBufInputStream in = new ByteBufInputStream(buf, 0)) {
             assertThrows(EOFException.class, new Executable() {
                 @Override
                 public void execute() throws IOException {
@@ -304,7 +297,60 @@ public class ByteBufStreamTest {
             });
         } finally {
             buf.release();
-            in.close();
         }
+    }
+
+    @Test
+    public void testReleaseOnCloseInByteBufOutputStream() throws Exception {
+        ByteBuf buf = PooledByteBufAllocator.DEFAULT.buffer(16);
+        buf.writeBytes(new byte[] { 1, 2, 3, 4, 5, 6 });
+        ByteBufOutputStream out = new ByteBufOutputStream(buf, true);
+        try {
+            out.writeBoolean(true);
+            out.writeBoolean(false);
+            out.writeByte(42);
+            out.writeByte(224);
+            out.writeBytes("Hello, World!");
+            out.write(new byte[]{1, 3, 3, 4}, 0, 0);
+        } finally {
+            out.close();
+        }
+        // When releaseOnClose is set to true, ByteBuf will be automatically released after calling the close method of
+        // ByteBufOutputStream.
+        assertEquals(0, out.buffer().refCnt());
+    }
+
+    @Test
+    public void testGeneralByteBufOutputStream() throws Exception {
+        // case1
+        ByteBuf buf = PooledByteBufAllocator.DEFAULT.buffer(16);
+        buf.writeBytes(new byte[] { 1, 2, 3, 4, 5, 6 });
+        final ByteBufOutputStream out = new ByteBufOutputStream(buf, false);
+        try {
+            out.writeBoolean(true);
+            out.writeBoolean(false);
+            out.writeByte(42);
+            out.writeByte(224);
+            out.writeBytes("Hello, World!");
+            out.write(new byte[]{1, 3, 3, 4}, 0, 0);
+        } finally {
+            out.close();
+        }
+        assertEquals(1, out.buffer().refCnt());
+
+        // When releaseOnClose is not set or releaseOnClose is false, ByteBuf must be released manually.
+        out.buffer().release();
+        assertEquals(0, out.buffer().refCnt());
+    }
+
+    @Test
+    void writeStringMustIgnoreHigherOrderByte() throws Exception {
+        ByteBuf buf = Unpooled.buffer();
+        try (ByteBufOutputStream out = new ByteBufOutputStream(buf, false)) {
+            out.writeBytes("√");
+        }
+        assertEquals(0x221A, '√'); // This is a multibyte character
+        assertEquals(0x1A, buf.readByte()); // Only the lower-order byte is written
+        assertEquals(0, buf.readableBytes());
     }
 }

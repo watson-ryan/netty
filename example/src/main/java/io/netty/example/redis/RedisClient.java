@@ -21,14 +21,14 @@ import io.netty.channel.ChannelFuture;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.redis.RedisArrayAggregator;
 import io.netty.handler.codec.redis.RedisBulkStringAggregator;
 import io.netty.handler.codec.redis.RedisDecoder;
 import io.netty.handler.codec.redis.RedisEncoder;
-import io.netty.util.concurrent.GenericFutureListener;
 
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -41,7 +41,7 @@ public class RedisClient {
     private static final int PORT = Integer.parseInt(System.getProperty("port", "6379"));
 
     public static void main(String[] args) throws Exception {
-        EventLoopGroup group = new NioEventLoopGroup();
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
         try {
             Bootstrap b = new Bootstrap();
             b.group(group)
@@ -76,13 +76,10 @@ public class RedisClient {
                 }
                 // Sends the received line to the server.
                 lastWriteFuture = ch.writeAndFlush(line);
-                lastWriteFuture.addListener(new GenericFutureListener<ChannelFuture>() {
-                    @Override
-                    public void operationComplete(ChannelFuture future) throws Exception {
-                        if (!future.isSuccess()) {
-                            System.err.print("write failed: ");
-                            future.cause().printStackTrace(System.err);
-                        }
+                lastWriteFuture.addListener(future -> {
+                    if (!future.isSuccess()) {
+                        System.err.print("write failed: ");
+                        future.cause().printStackTrace(System.err);
                     }
                 });
             }

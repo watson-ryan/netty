@@ -19,7 +19,6 @@ import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.ByteBufAllocator;
-import io.netty.buffer.Unpooled;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelConfig;
 import io.netty.channel.ChannelHandlerContext;
@@ -36,6 +35,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static io.netty.testsuite.transport.TestsuitePermutation.randomBufferType;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -67,7 +67,7 @@ public class SocketAutoReadTest extends AbstractSocketTest {
                     .childOption(ChannelOption.AUTO_READ, true)
                     // We want to ensure that we attempt multiple individual read operations per read loop so we can
                     // test the auto read feature being turned off when data is first read.
-                    .childOption(ChannelOption.RCVBUF_ALLOCATOR, new TestRecvByteBufAllocator())
+                    .childOption(ChannelOption.RECVBUF_ALLOCATOR, new TestRecvByteBufAllocator())
                     .childHandler(serverInitializer);
 
             serverChannel = sb.bind().syncUninterruptibly().channel();
@@ -75,17 +75,18 @@ public class SocketAutoReadTest extends AbstractSocketTest {
             cb.option(ChannelOption.AUTO_READ, true)
                     // We want to ensure that we attempt multiple individual read operations per read loop so we can
                     // test the auto read feature being turned off when data is first read.
-                    .option(ChannelOption.RCVBUF_ALLOCATOR, new TestRecvByteBufAllocator())
+                    .option(ChannelOption.RECVBUF_ALLOCATOR, new TestRecvByteBufAllocator())
                     .handler(clientInitializer);
 
             clientChannel = cb.connect(serverChannel.localAddress()).syncUninterruptibly().channel();
 
             // 3 bytes means 3 independent reads for TestRecvByteBufAllocator
-            clientChannel.writeAndFlush(Unpooled.wrappedBuffer(new byte[3]));
+            clientChannel.writeAndFlush(randomBufferType(clientChannel.alloc(), new byte[3], 0, 3));
             serverInitializer.autoReadHandler.assertSingleRead();
 
             // 3 bytes means 3 independent reads for TestRecvByteBufAllocator
-            serverInitializer.channel.writeAndFlush(Unpooled.wrappedBuffer(new byte[3]));
+            serverInitializer.channel.writeAndFlush(
+                    randomBufferType(serverInitializer.channel.alloc(), new byte[3], 0, 3));
             clientInitializer.autoReadHandler.assertSingleRead();
 
             if (readOutsideEventLoopThread) {

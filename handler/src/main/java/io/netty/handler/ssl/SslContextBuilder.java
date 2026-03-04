@@ -22,8 +22,11 @@ import io.netty.util.internal.UnstableApi;
 
 import javax.net.ssl.KeyManager;
 import javax.net.ssl.KeyManagerFactory;
+import javax.net.ssl.SNIHostName;
+import javax.net.ssl.SNIServerName;
 import javax.net.ssl.SSLEngine;
 import javax.net.ssl.SSLException;
+import javax.net.ssl.SSLParameters;
 import javax.net.ssl.TrustManager;
 import javax.net.ssl.TrustManagerFactory;
 import java.io.File;
@@ -31,8 +34,10 @@ import java.io.InputStream;
 import java.security.KeyStore;
 import java.security.PrivateKey;
 import java.security.Provider;
+import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -42,6 +47,7 @@ import static io.netty.util.internal.EmptyArrays.EMPTY_X509_CERTIFICATES;
 import static io.netty.util.internal.ObjectUtil.checkNotNull;
 import static io.netty.util.internal.ObjectUtil.checkNotNullWithIAE;
 import static io.netty.util.internal.ObjectUtil.checkNonEmpty;
+import static io.netty.util.internal.ObjectUtil.deepCheckNotNull;
 
 /**
  * Builder for configuring a new SslContext for creation.
@@ -168,7 +174,7 @@ public final class SslContextBuilder {
 
     /**
      * Creates a builder for new server-side {@link SslContext}.
-     *
+     * <p>
      * If you use {@link SslProvider#OPENSSL} or {@link SslProvider#OPENSSL_REFCNT} consider using
      * {@link OpenSslX509KeyManagerFactory} or {@link OpenSslCachingX509KeyManagerFactory}.
      *
@@ -197,6 +203,7 @@ public final class SslContextBuilder {
     private PrivateKey key;
     private String keyPassword;
     private KeyManagerFactory keyManagerFactory;
+    private List<OpenSslCredential> credentials;
     private Iterable<String> ciphers;
     private CipherSuiteFilter cipherFilter = IdentityCipherSuiteFilter.INSTANCE;
     private ApplicationProtocolConfig apn;
@@ -206,11 +213,18 @@ public final class SslContextBuilder {
     private String[] protocols;
     private boolean startTls;
     private boolean enableOcsp;
+    private SecureRandom secureRandom;
     private String keyStoreType = KeyStore.getDefaultType();
+    private String endpointIdentificationAlgorithm;
     private final Map<SslContextOption<?>, Object> options = new HashMap<SslContextOption<?>, Object>();
+    private final List<SNIServerName> serverNames;
 
     private SslContextBuilder(boolean forServer) {
         this.forServer = forServer;
+        if (!forServer) {
+            endpointIdentificationAlgorithm = SslUtils.defaultEndpointVerificationAlgorithm;
+        }
+        serverNames = forServer ? null : new ArrayList<>(2); // Only for clients.
     }
 
     /**
@@ -266,7 +280,7 @@ public final class SslContextBuilder {
     /**
      * Trusted certificates for verifying the remote endpoint's certificate. The input stream should
      * contain an X.509 certificate collection in PEM format. {@code null} uses the system default.
-     *
+     * <p>
      * The caller is responsible for calling {@link InputStream#close()} after {@link #build()} has been called.
      */
     public SslContextBuilder trustManager(InputStream trustCertCollectionInputStream) {
@@ -310,7 +324,11 @@ public final class SslContextBuilder {
      * {@link #trustManager(TrustManagerFactory trustManagerFactory)} also apply here.
      */
     public SslContextBuilder trustManager(TrustManager trustManager) {
-        this.trustManagerFactory = new TrustManagerFactoryWrapper(trustManager);
+        if (trustManager != null) {
+            trustManagerFactory = new TrustManagerFactoryWrapper(trustManager);
+        } else {
+            trustManagerFactory = null;
+        }
         trustCertCollection = null;
         return this;
     }
@@ -429,7 +447,7 @@ public final class SslContextBuilder {
      */
     public SslContextBuilder keyManager(PrivateKey key, String keyPassword, X509Certificate... keyCertChain) {
         if (forServer) {
-            checkNonEmpty(keyCertChain, "keyCertChain"); // lgtm[java/dereferenced-value-may-be-null]
+            checkNonEmpty(keyCertChain, "keyCertChain");
             checkNotNull(key, "key required for servers");
         }
         if (keyCertChain == null || keyCertChain.length == 0) {
@@ -467,7 +485,7 @@ public final class SslContextBuilder {
      * if the used openssl version is 1.0.1+. You can check if your openssl version supports using a
      * {@link KeyManagerFactory} by calling {@link OpenSsl#supportsKeyManagerFactory()}. If this is not the case
      * you must use {@link #keyManager(File, File)} or {@link #keyManager(File, File, String)}.
-     *
+     * <p>
      * If you use {@link SslProvider#OPENSSL} or {@link SslProvider#OPENSSL_REFCNT} consider using
      * {@link OpenSslX509KeyManagerFactory} or {@link OpenSslCachingX509KeyManagerFactory}.
      */
@@ -483,6 +501,87 @@ public final class SslContextBuilder {
     }
 
     /**
+     * Adds a single {@link OpenSslCredential} to this context.
+     *
+     * <p>This is useful for multi-certificate scenarios, such as serving both RSA and ECDSA
+     * certificates to support different client capabilities.
+     *
+     * <p>Credential instances are built with the {@link OpenSslCredentialBuilder}.
+     *
+     * <p>This is a BoringSSL-specific feature and only works with {@link SslProvider#OPENSSL}
+     * or {@link SslProvider#OPENSSL_REFCNT}.
+     * Check {@link OpenSslCredential#isAvailable()} to verify that the feature is supported.
+     *
+     * @param credential the credential to add
+     * @return this builder for chaining
+     * @see OpenSslCredentialBuilder
+     */
+    public SslContextBuilder addCredential(OpenSslCredential credential) {
+        checkNotNull(credential, "credential");
+        if (credentials == null) {
+            credentials = new ArrayList<>();
+        }
+        credentials.add(credential);
+        return this;
+    }
+
+    /**
+     * Adds multiple {@link OpenSslCredential}s to this context.
+     *
+     * <p>This is useful for multi-certificate scenarios, such as serving both RSA and ECDSA
+     * certificates to support different client capabilities.
+     *
+     * <p>Credential instances are built with the {@link OpenSslCredentialBuilder}.
+     *
+     * <p>This is a BoringSSL-specific feature and only works with {@link SslProvider#OPENSSL}
+     * or {@link SslProvider#OPENSSL_REFCNT}.
+     * Check {@link OpenSslCredential#isAvailable()} to verify that the feature is supported.
+     *
+     * @param credentials the credentials to add
+     * @return this builder for chaining
+     * @see OpenSslCredentialBuilder
+     */
+    public SslContextBuilder addCredentials(OpenSslCredential... credentials) {
+        deepCheckNotNull("credentials", credentials);
+        if (this.credentials == null) {
+            this.credentials = new ArrayList<>(credentials.length);
+        }
+        Collections.addAll(this.credentials, credentials);
+        return this;
+    }
+
+    /**
+     * Adds multiple {@link OpenSslCredential}s to this context.
+     *
+     * <p>This is useful for multi-certificate scenarios, such as serving both RSA and ECDSA
+     * certificates to support different client capabilities.
+     *
+     * <p>Credential instances are built with the {@link OpenSslCredentialBuilder}.
+     *
+     * <p>This is a BoringSSL-specific feature and only works with {@link SslProvider#OPENSSL}
+     * or {@link SslProvider#OPENSSL_REFCNT}.
+     * Check {@link OpenSslCredential#isAvailable()} to verify that the feature is supported.
+     *
+     * @param credentials the credentials to add
+     * @return this builder for chaining
+     * @see OpenSslCredentialBuilder
+     */
+    public SslContextBuilder addCredentials(Iterable<? extends OpenSslCredential> credentials) {
+        checkNotNull(credentials, "credentials");
+        // Validate all credentials before adding any of them to avoid partial state
+        for (OpenSslCredential credential : credentials) {
+            checkNotNull(credential, "credential");
+        }
+        if (this.credentials == null) {
+            this.credentials = new ArrayList<>();
+        }
+        for (OpenSslCredential credential : credentials) {
+            this.credentials.add(credential);
+        }
+        return this;
+    }
+
+    /**
      * A single key manager managing the identity information of this host.
      * This is helpful when custom implementation of {@link KeyManager} is needed.
      * Internally, a wrapper of {@link KeyManagerFactory} that only produces this specified
@@ -494,9 +593,9 @@ public final class SslContextBuilder {
             checkNotNull(keyManager, "keyManager required for servers");
         }
         if (keyManager != null) {
-            this.keyManagerFactory = new KeyManagerFactoryWrapper(keyManager);
+            keyManagerFactory = new KeyManagerFactoryWrapper(keyManager);
         } else {
-            this.keyManagerFactory = null;
+            keyManagerFactory = null;
         }
         keyCertChain = null;
         key = null;
@@ -597,6 +696,59 @@ public final class SslContextBuilder {
     }
 
     /**
+     * Specify a non-default source of randomness for the {@link JdkSslContext}
+     * <p>
+     * In general, the best practice is to leave this unspecified, or to assign a new random source using the
+     * default {@code new SecureRandom()} constructor.
+     * Only assign this something when you have a good reason to.
+     *
+     * @param secureRandom the source of randomness for {@link JdkSslContext}
+     *
+     */
+    public SslContextBuilder secureRandom(SecureRandom secureRandom) {
+        this.secureRandom = secureRandom;
+        return this;
+    }
+
+    /**
+     * Specify the endpoint identification algorithm (aka. hostname verification algorithm) that clients will use as
+     * part of authenticating servers.
+     * <p>
+     * See <a href="https://docs.oracle.com/javase/8/docs/technotes/guides/security/StandardNames.html#jssenames">
+     *     Java Security Standard Names</a> for a list of supported algorithms.
+     *
+     * @param algorithm either {@code "HTTPS"}, {@code "LDAPS"}, or {@code null} (disables hostname verification).
+     * @see SSLParameters#setEndpointIdentificationAlgorithm(String)
+     */
+    public SslContextBuilder endpointIdentificationAlgorithm(String algorithm) {
+        endpointIdentificationAlgorithm = algorithm;
+        return this;
+    }
+
+    /**
+     * Add the given server name indication to this client context. This will cause the client to include a
+     * Server Name Indication extension with its {@code ClientHello} message, as per
+     * <a href="https://datatracker.ietf.org/doc/html/rfc6066#section-3">RFC 6066 section 3</a>.
+     * <p>
+     * Note that only one name per name type can be included in the message.
+     * Currently, only the {@link SNIHostName} type is supported.
+     * @param serverName The server name to include in the SNI extension.
+     */
+    public SslContextBuilder serverName(SNIServerName serverName) {
+        if (forServer) {
+            throw new UnsupportedOperationException("Cannot add Server Name Indication extension, " +
+                    "because this is a server context builder.");
+        }
+        checkNotNull(serverName, "serverName");
+        if (!(serverName instanceof SNIHostName)) {
+            throw new IllegalArgumentException("Only SNIHostName is supported. The given SNIServerName type was " +
+                    serverName.getClass().getName());
+        }
+        serverNames.add(serverName);
+        return this;
+    }
+
+    /**
      * Create new {@code SslContext} instance with configured settings.
      * <p>If {@link #sslProvider(SslProvider)} is set to {@link SslProvider#OPENSSL_REFCNT} then the caller is
      * responsible for releasing this object, or else native memory may leak.
@@ -606,12 +758,14 @@ public final class SslContextBuilder {
             return SslContext.newServerContextInternal(provider, sslContextProvider, trustCertCollection,
                 trustManagerFactory, keyCertChain, key, keyPassword, keyManagerFactory,
                 ciphers, cipherFilter, apn, sessionCacheSize, sessionTimeout, clientAuth, protocols, startTls,
-                enableOcsp, keyStoreType, toArray(options.entrySet(), EMPTY_ENTRIES));
+                enableOcsp, secureRandom, keyStoreType, toArray(options.entrySet(), EMPTY_ENTRIES),
+                credentials);
         } else {
             return SslContext.newClientContextInternal(provider, sslContextProvider, trustCertCollection,
                 trustManagerFactory, keyCertChain, key, keyPassword, keyManagerFactory,
-                ciphers, cipherFilter, apn, protocols, sessionCacheSize, sessionTimeout, enableOcsp, keyStoreType,
-                    toArray(options.entrySet(), EMPTY_ENTRIES));
+                ciphers, cipherFilter, apn, protocols, sessionCacheSize,
+                    sessionTimeout, enableOcsp, secureRandom, keyStoreType, endpointIdentificationAlgorithm,
+                    serverNames, toArray(options.entrySet(), EMPTY_ENTRIES), credentials);
         }
     }
 

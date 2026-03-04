@@ -20,8 +20,10 @@ import io.netty.buffer.UnpooledByteBufAllocator;
 import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.SimpleChannelInboundHandler;
 import io.netty.channel.embedded.EmbeddedChannel;
+import io.netty.handler.ssl.util.CachedSelfSignedCertificate;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
+import io.netty.util.ReferenceCountUtil;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -37,13 +39,13 @@ import static io.netty.buffer.Unpooled.EMPTY_BUFFER;
 import static io.netty.handler.codec.ByteToMessageDecoder.MERGE_CUMULATOR;
 import static java.nio.charset.StandardCharsets.US_ASCII;
 import static java.util.Arrays.asList;
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.empty;
-import static org.hamcrest.Matchers.equalTo;
-import static org.hamcrest.Matchers.greaterThanOrEqualTo;
-import static org.hamcrest.Matchers.instanceOf;
-import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.notNullValue;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class CloseNotifyTest {
@@ -87,25 +89,25 @@ public class CloseNotifyTest {
             forwardData(serverChannel, clientChannel);
             forwardData(clientChannel, serverChannel);
             forwardData(serverChannel, clientChannel);
-            assertThat(clientEventQueue.poll(), instanceOf(SslHandshakeCompletionEvent.class));
-            assertThat(serverEventQueue.poll(), instanceOf(SslHandshakeCompletionEvent.class));
-            assertThat(handshakenProtocol(clientChannel), equalTo(protocol));
+            assertInstanceOf(SslHandshakeCompletionEvent.class, clientEventQueue.poll());
+            assertInstanceOf(SslHandshakeCompletionEvent.class, serverEventQueue.poll());
+            assertEquals(protocol, handshakenProtocol(clientChannel));
 
             // send data:
             clientChannel.writeOutbound(writeAscii(ALLOC, "request_msg"));
             forwardData(clientChannel, serverChannel);
-            assertThat(serverEventQueue.poll(), equalTo((Object) "request_msg"));
+            assertEquals("request_msg", serverEventQueue.poll());
 
             // respond with data and close_notify:
             serverChannel.writeOutbound(writeAscii(ALLOC, "response_msg"));
-            assertThat(serverChannel.finish(), is(true));
-            assertThat(serverEventQueue.poll(), instanceOf(SslCloseCompletionEvent.class));
-            assertThat(clientEventQueue, empty());
+            assertTrue(serverChannel.finish());
+            assertInstanceOf(SslCloseCompletionEvent.class, serverEventQueue.poll());
+            assertTrue(clientEventQueue.isEmpty());
 
             // consume server response with close_notify:
             forwardAllWithCloseNotify(serverChannel, clientChannel);
-            assertThat(clientEventQueue.poll(), equalTo((Object) "response_msg"));
-            assertThat(clientEventQueue.poll(), instanceOf(SslCloseCompletionEvent.class));
+            assertEquals("response_msg", clientEventQueue.poll());
+            assertInstanceOf(SslCloseCompletionEvent.class, clientEventQueue.poll());
 
             // make sure client automatically responds with close_notify:
             if (!jdkTls13(provider, protocol)) {
@@ -128,15 +130,15 @@ public class CloseNotifyTest {
             discardEmptyOutboundBuffers(clientChannel);
         }
 
-        assertThat(clientEventQueue.poll(), is(INACTIVE));
-        assertThat(clientEventQueue, empty());
-        assertThat(serverEventQueue.poll(), is(INACTIVE));
-        assertThat(serverEventQueue, empty());
+        assertEquals(INACTIVE, clientEventQueue.poll());
+        assertTrue(clientEventQueue.isEmpty());
+        assertEquals(INACTIVE, serverEventQueue.poll());
+        assertTrue(serverEventQueue.isEmpty());
 
-        assertThat(clientChannel.releaseInbound(), is(false));
-        assertThat(clientChannel.releaseOutbound(), is(false));
-        assertThat(serverChannel.releaseInbound(), is(false));
-        assertThat(serverChannel.releaseOutbound(), is(false));
+        assertFalse(clientChannel.releaseInbound());
+        assertFalse(clientChannel.releaseOutbound());
+        assertFalse(serverChannel.releaseInbound());
+        assertFalse(serverChannel.releaseOutbound());
     }
 
     private static boolean jdkTls13(SslProvider provider, String protocol) {
@@ -146,17 +148,20 @@ public class CloseNotifyTest {
     private static EmbeddedChannel initChannel(SslProvider provider, String protocol, final boolean useClientMode,
             final BlockingQueue<Object> eventQueue) throws Exception {
 
-        SelfSignedCertificate ssc = new SelfSignedCertificate();
+        SelfSignedCertificate ssc = CachedSelfSignedCertificate.getCachedCertificate();
         final SslContext sslContext = (useClientMode
                 ? SslContextBuilder.forClient().trustManager(InsecureTrustManagerFactory.INSTANCE)
                 : SslContextBuilder.forServer(ssc.certificate(), ssc.privateKey()))
                  .sslProvider(provider)
                  .protocols(protocol)
                 .build();
+        // use sslContext.newHandler(ALLOC) instead of new SslHandler(sslContext.newEngine(ALLOC)) to create
+        // non-JDK compatible OpenSSL engine that can process partial packets:
+        SslHandler handler = sslContext.newHandler(ALLOC);
+        // handler incremented the reference count and will destroy it when removed
+        ReferenceCountUtil.release(sslContext);
         return new EmbeddedChannel(
-                // use sslContext.newHandler(ALLOC) instead of new SslHandler(sslContext.newEngine(ALLOC)) to create
-                // non-JDK compatible OpenSSL engine that can process partial packets:
-                sslContext.newHandler(ALLOC),
+                handler,
                 new SimpleChannelInboundHandler<ByteBuf>() {
 
                     @Override
@@ -219,10 +224,9 @@ public class CloseNotifyTest {
     }
 
     static void assertCloseNotify(ByteBuf closeNotify) {
-        assertThat(closeNotify, notNullValue());
+        assertNotNull(closeNotify);
         try {
-            assertThat("Doesn't match expected length of close_notify alert",
-                    closeNotify.readableBytes(), greaterThanOrEqualTo(7));
+            assertThat(closeNotify.readableBytes()).isGreaterThanOrEqualTo(7);
         } finally {
             closeNotify.release();
         }

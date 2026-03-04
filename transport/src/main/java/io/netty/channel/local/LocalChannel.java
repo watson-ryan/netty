@@ -15,6 +15,7 @@
  */
 package io.netty.channel.local;
 
+import io.netty.buffer.ByteBuf;
 import io.netty.channel.AbstractChannel;
 import io.netty.channel.Channel;
 import io.netty.channel.ChannelConfig;
@@ -24,6 +25,9 @@ import io.netty.channel.ChannelPipeline;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.DefaultChannelConfig;
 import io.netty.channel.EventLoop;
+import io.netty.channel.IoEvent;
+import io.netty.channel.IoEventLoop;
+import io.netty.channel.IoRegistration;
 import io.netty.channel.PreferHeapByteBufAllocator;
 import io.netty.channel.RecvByteBufAllocator;
 import io.netty.channel.SingleThreadEventLoop;
@@ -76,6 +80,15 @@ public class LocalChannel extends AbstractChannel {
             unsafe().close(unsafe().voidPromise());
         }
     };
+
+    private final Runnable finishReadTask = new Runnable() {
+        @Override
+        public void run() {
+            finishPeerRead0(LocalChannel.this);
+        }
+    };
+
+    private IoRegistration registration;
 
     private volatile State state;
     private volatile LocalChannel peer;
@@ -141,7 +154,8 @@ public class LocalChannel extends AbstractChannel {
 
     @Override
     protected boolean isCompatible(EventLoop loop) {
-        return loop instanceof SingleThreadEventLoop;
+        return loop instanceof SingleThreadEventLoop ||
+                (loop instanceof IoEventLoop && ((IoEventLoop) loop).isCompatible(LocalUnsafe.class));
     }
 
     @Override
@@ -155,39 +169,40 @@ public class LocalChannel extends AbstractChannel {
     }
 
     @Override
-    protected void doRegister() throws Exception {
-        // Check if both peer and parent are non-null because this channel was created by a LocalServerChannel.
-        // This is needed as a peer may not be null also if a LocalChannel was connected before and
-        // deregistered / registered later again.
-        //
-        // See https://github.com/netty/netty/issues/2400
-        if (peer != null && parent() != null) {
-            // Store the peer in a local variable as it may be set to null if doClose() is called.
-            // See https://github.com/netty/netty/issues/2144
-            final LocalChannel peer = this.peer;
-            state = State.CONNECTED;
-
-            peer.remoteAddress = parent() == null ? null : parent().localAddress();
-            peer.state = State.CONNECTED;
-
-            // Always call peer.eventLoop().execute() even if peer.eventLoop().inEventLoop() is true.
-            // This ensures that if both channels are on the same event loop, the peer's channelActive
-            // event is triggered *after* this channel's channelRegistered event, so that this channel's
-            // pipeline is fully initialized by ChannelInitializer before any channelRead events.
-            peer.eventLoop().execute(new Runnable() {
-                @Override
-                public void run() {
-                    ChannelPromise promise = peer.connectPromise;
-
-                    // Only trigger fireChannelActive() if the promise was not null and was not completed yet.
-                    // connectPromise may be set to null if doClose() was called in the meantime.
-                    if (promise != null && promise.trySuccess()) {
-                        peer.pipeline().fireChannelActive();
-                    }
-                }
+    protected void doRegister(ChannelPromise promise) {
+        EventLoop loop = eventLoop();
+        if (loop instanceof IoEventLoop) {
+            assert registration == null;
+            ((IoEventLoop) loop).register((LocalUnsafe) unsafe()).addListener(f -> {
+               if (f.isSuccess()) {
+                   registration = (IoRegistration) f.getNow();
+                   promise.setSuccess();
+               } else {
+                   promise.setFailure(f.cause());
+               }
             });
+        } else {
+            try {
+                ((LocalUnsafe) unsafe()).registered();
+            } catch (Throwable cause) {
+                promise.setFailure(cause);
+            }
+            promise.setSuccess();
         }
-        ((SingleThreadEventExecutor) eventLoop()).addShutdownHook(shutdownHook);
+    }
+
+    @Override
+    protected void doDeregister() throws Exception {
+        EventLoop loop = eventLoop();
+        if (loop instanceof IoEventLoop) {
+            IoRegistration registration = this.registration;
+            if (registration != null) {
+                this.registration = null;
+                registration.cancel();
+            }
+        } else {
+            ((LocalUnsafe) unsafe()).unregistered();
+        }
     }
 
     @Override
@@ -281,12 +296,6 @@ public class LocalChannel extends AbstractChannel {
         }
     }
 
-    @Override
-    protected void doDeregister() throws Exception {
-        // Just remove the shutdownHook as this Channel may be closed later or registered to another EventLoop
-        ((SingleThreadEventExecutor) eventLoop()).removeShutdownHook(shutdownHook);
-    }
-
     private void readInbound() {
         RecvByteBufAllocator.Handle handle = unsafe().recvBufAllocHandle();
         handle.reset(config());
@@ -296,6 +305,29 @@ public class LocalChannel extends AbstractChannel {
             if (received == null) {
                 break;
             }
+            if (received instanceof ByteBuf && inboundBuffer.peek() instanceof ByteBuf) {
+                ByteBuf msg = (ByteBuf) received;
+                ByteBuf output = handle.allocate(alloc());
+                if (msg.readableBytes() < output.writableBytes()) {
+                    // We have an opportunity to coalesce buffers.
+                    output.writeBytes(msg, msg.readerIndex(), msg.readableBytes());
+                    msg.release();
+                    while ((received = inboundBuffer.peek()) instanceof ByteBuf &&
+                            ((ByteBuf) received).readableBytes() < output.writableBytes()) {
+                        inboundBuffer.poll();
+                        msg = (ByteBuf) received;
+                        output.writeBytes(msg, msg.readerIndex(), msg.readableBytes());
+                        msg.release();
+                    }
+                    handle.lastBytesRead(output.readableBytes());
+                    received = output; // Send the coalesced buffer down the pipeline.
+                } else {
+                    // It won't be profitable to coalesce buffers this time around.
+                    handle.lastBytesRead(output.capacity());
+                    output.release();
+                }
+            }
+            handle.incMessagesRead(1);
             pipeline.fireChannelRead(received);
         } while (handle.continueReading());
         handle.readComplete();
@@ -315,7 +347,7 @@ public class LocalChannel extends AbstractChannel {
         }
 
         final InternalThreadLocalMap threadLocals = InternalThreadLocalMap.get();
-        final Integer stackDepth = threadLocals.localChannelReaderStackDepth();
+        final int stackDepth = threadLocals.localChannelReaderStackDepth();
         if (stackDepth < MAX_READER_STACK_DEPTH) {
             threadLocals.setLocalChannelReaderStackDepth(stackDepth + 1);
             try {
@@ -394,21 +426,19 @@ public class LocalChannel extends AbstractChannel {
         }
     }
 
-    private void runFinishPeerReadTask(final LocalChannel peer) {
+    private void runFinishTask0() {
         // If the peer is writing, we must wait until after reads are completed for that peer before we can read. So
         // we keep track of the task, and coordinate later that our read can't happen until the peer is done.
-        final Runnable finishPeerReadTask = new Runnable() {
-            @Override
-            public void run() {
-                finishPeerRead0(peer);
-            }
-        };
+        if (writeInProgress) {
+            finishReadFuture = eventLoop().submit(finishReadTask);
+        } else {
+            eventLoop().execute(finishReadTask);
+        }
+    }
+
+    private void runFinishPeerReadTask(final LocalChannel peer) {
         try {
-            if (peer.writeInProgress) {
-                peer.finishReadFuture = peer.eventLoop().submit(finishPeerReadTask);
-            } else {
-                peer.eventLoop().execute(finishPeerReadTask);
-            }
+            peer.runFinishTask0();
         } catch (Throwable cause) {
             logger.warn("Closing Local channels {}-{} because exception occurred!", this, peer, cause);
             close();
@@ -446,7 +476,69 @@ public class LocalChannel extends AbstractChannel {
         }
     }
 
-    private class LocalUnsafe extends AbstractUnsafe {
+    private class LocalUnsafe extends AbstractUnsafe implements LocalIoHandle {
+
+        @Override
+        public void close() {
+            close(voidPromise());
+        }
+
+        @Override
+        public void handle(IoRegistration registration, IoEvent event) {
+            // NOOP
+        }
+
+        @Override
+        public void registered() {
+            // Check if both peer and parent are non-null because this channel was created by a LocalServerChannel.
+            // This is needed as a peer may not be null also if a LocalChannel was connected before and
+            // deregistered / registered later again.
+            //
+            // See https://github.com/netty/netty/issues/2400
+            if (peer != null && parent() != null) {
+                // Store the peer in a local variable as it may be set to null if doClose() is called.
+                // See https://github.com/netty/netty/issues/2144
+                final LocalChannel peer = LocalChannel.this.peer;
+                state = State.CONNECTED;
+
+                peer.remoteAddress = parent() == null ? null : parent().localAddress();
+                peer.state = State.CONNECTED;
+
+                // Always call peer.eventLoop().execute() even if peer.eventLoop().inEventLoop() is true.
+                // This ensures that if both channels are on the same event loop, the peer's channelActive
+                // event is triggered *after* this channel's channelRegistered event, so that this channel's
+                // pipeline is fully initialized by ChannelInitializer before any channelRead events.
+                peer.eventLoop().execute(new Runnable() {
+                    @Override
+                    public void run() {
+                        ChannelPromise promise = peer.connectPromise;
+
+                        // Only trigger fireChannelActive() if the promise was not null and was not completed yet.
+                        // connectPromise may be set to null if doClose() was called in the meantime.
+                        if (promise != null && promise.trySuccess()) {
+                            peer.pipeline().fireChannelActive();
+                        }
+                    }
+                });
+            }
+            EventLoop loop = eventLoop();
+            if (!(loop instanceof IoEventLoop) && loop instanceof SingleThreadEventExecutor) {
+                ((SingleThreadEventExecutor) eventLoop()).addShutdownHook(shutdownHook);
+            }
+        }
+
+        @Override
+        public void unregistered() {
+            EventLoop loop = eventLoop();
+            if (!(loop instanceof IoEventLoop) && loop instanceof SingleThreadEventExecutor) {
+                ((SingleThreadEventExecutor) eventLoop()).removeShutdownHook(shutdownHook);
+            }
+        }
+
+        @Override
+        public void closeNow() {
+            close(voidPromise());
+        }
 
         @Override
         public void connect(final SocketAddress remoteAddress,
@@ -458,7 +550,6 @@ public class LocalChannel extends AbstractChannel {
             if (state == State.CONNECTED) {
                 Exception cause = new AlreadyConnectedException();
                 safeSetFailure(promise, cause);
-                pipeline().fireExceptionCaught(cause);
                 return;
             }
 

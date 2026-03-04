@@ -18,7 +18,8 @@ package io.netty.testsuite.transport.sctp;
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.oio.OioEventLoopGroup;
 import io.netty.channel.sctp.nio.NioSctpChannel;
 import io.netty.channel.sctp.nio.NioSctpServerChannel;
@@ -35,15 +36,10 @@ import java.util.List;
 
 public final class SctpTestPermutation {
 
-    private static final int BOSSES = 2;
-    private static final int WORKERS = 3;
-    private static final EventLoopGroup nioBossGroup =
-            new NioEventLoopGroup(BOSSES, new DefaultThreadFactory("testsuite-sctp-nio-boss", true));
-    private static final EventLoopGroup nioWorkerGroup =
-            new NioEventLoopGroup(WORKERS, new DefaultThreadFactory("testsuite-sctp-nio-worker", true));
-    private static final EventLoopGroup oioBossGroup =
-            new OioEventLoopGroup(Integer.MAX_VALUE, new DefaultThreadFactory("testsuite-sctp-oio-boss", true));
-    private static final EventLoopGroup oioWorkerGroup =
+    private static final int NUM_THREADS = 4;
+    private static final EventLoopGroup NIO_GROUP = new MultiThreadIoEventLoopGroup(
+            NUM_THREADS, new DefaultThreadFactory("testsuite-sctp-nio", true), NioIoHandler.newFactory());
+    private static final EventLoopGroup OIO_GROUP =
             new OioEventLoopGroup(Integer.MAX_VALUE, new DefaultThreadFactory("testsuite-sctp-oio-worker", true));
 
     static List<BootstrapFactory<ServerBootstrap>> sctpServerChannel() {
@@ -57,7 +53,7 @@ public final class SctpTestPermutation {
             @Override
             public ServerBootstrap newInstance() {
                 return new ServerBootstrap().
-                        group(nioBossGroup, nioWorkerGroup).
+                        group(NIO_GROUP).
                         channel(NioSctpServerChannel.class);
             }
         });
@@ -65,7 +61,7 @@ public final class SctpTestPermutation {
             @Override
             public ServerBootstrap newInstance() {
                 return new ServerBootstrap().
-                        group(oioBossGroup, oioWorkerGroup).
+                        group(OIO_GROUP).
                         channel(OioSctpServerChannel.class);
             }
         });
@@ -82,13 +78,13 @@ public final class SctpTestPermutation {
         list.add(new BootstrapFactory<Bootstrap>() {
             @Override
             public Bootstrap newInstance() {
-                return new Bootstrap().group(nioWorkerGroup).channel(NioSctpChannel.class);
+                return new Bootstrap().group(NIO_GROUP).channel(NioSctpChannel.class);
             }
         });
         list.add(new BootstrapFactory<Bootstrap>() {
             @Override
             public Bootstrap newInstance() {
-                return new Bootstrap().group(oioWorkerGroup).channel(OioSctpChannel.class);
+                return new Bootstrap().group(OIO_GROUP).channel(OioSctpChannel.class);
             }
         });
         return list;

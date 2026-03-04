@@ -16,11 +16,10 @@
 package io.netty.example.uptime;
 
 import io.netty.bootstrap.Bootstrap;
-import io.netty.channel.ChannelFuture;
-import io.netty.channel.ChannelFutureListener;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.EventLoopGroup;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.SocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.timeout.IdleStateHandler;
@@ -44,7 +43,7 @@ public final class UptimeClient {
     private static final Bootstrap bs = new Bootstrap();
 
     public static void main(String[] args) throws Exception {
-        EventLoopGroup group = new NioEventLoopGroup();
+        EventLoopGroup group = new MultiThreadIoEventLoopGroup(NioIoHandler.newFactory());
         bs.group(group)
                 .channel(NioSocketChannel.class)
                 .remoteAddress(HOST, PORT)
@@ -58,13 +57,10 @@ public final class UptimeClient {
     }
 
     static void connect() {
-        bs.connect().addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) throws Exception {
-                if (future.cause() != null) {
-                    handler.startTime = -1;
-                    handler.println("Failed to connect: " + future.cause());
-                }
+        bs.connect().addListener(future -> {
+            if (future.cause() != null) {
+                handler.startTime = -1;
+                handler.println("Failed to connect: " + future.cause());
             }
         });
     }

@@ -16,25 +16,25 @@
 package io.netty.handler.ssl;
 
 import io.netty.util.internal.EmptyArrays;
-import io.netty.util.internal.SuppressJava6Requirement;
 
+import java.security.Principal;
+import java.security.cert.Certificate;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
 import javax.net.ssl.ExtendedSSLSession;
+import javax.net.ssl.SNIServerName;
 import javax.net.ssl.SSLException;
 import javax.net.ssl.SSLPeerUnverifiedException;
 import javax.net.ssl.SSLSessionBindingEvent;
 import javax.net.ssl.SSLSessionBindingListener;
 import javax.security.cert.X509Certificate;
-import java.security.Principal;
-import java.security.cert.Certificate;
-import java.util.Collections;
-import java.util.List;
 
 /**
- * Delegates all operations to a wrapped {@link OpenSslSession} except the methods defined by {@link ExtendedSSLSession}
- * itself.
+ * Delegates all operations to a wrapped {@link OpenSslInternalSession} except the methods defined by
+ * {@link ExtendedSSLSession} itself.
  */
-@SuppressJava6Requirement(reason = "Usage guarded by java version check")
-abstract class ExtendedOpenSslSession extends ExtendedSSLSession implements OpenSslSession {
+abstract class ExtendedOpenSslSession extends ExtendedSSLSession implements OpenSslInternalSession {
 
     // TODO: use OpenSSL API to actually fetch the real data but for now just do what Conscrypt does:
     // https://github.com/google/conscrypt/blob/1.2.0/common/
@@ -45,16 +45,14 @@ abstract class ExtendedOpenSslSession extends ExtendedSSLSession implements Open
             "RSASSA-PSS",
     };
 
-    private final OpenSslSession wrapped;
+    private final OpenSslInternalSession wrapped;
 
-    ExtendedOpenSslSession(OpenSslSession wrapped) {
+    ExtendedOpenSslSession(OpenSslInternalSession wrapped) {
         this.wrapped = wrapped;
     }
 
-    // Use rawtypes an unchecked override to be able to also work on java7.
     @Override
-    @SuppressWarnings({ "unchecked", "rawtypes" })
-    public abstract List getRequestedServerNames();
+    public abstract List<SNIServerName> getRequestedServerNames();
 
     // Do not mark as override so we can compile on java8.
     public List<byte[]> getStatusResponses() {
@@ -64,13 +62,24 @@ abstract class ExtendedOpenSslSession extends ExtendedSSLSession implements Open
     }
 
     @Override
+    public void prepareHandshake() {
+        wrapped.prepareHandshake();
+    }
+
+    @Override
+    public Map<String, Object> keyValueStorage() {
+        return wrapped.keyValueStorage();
+    }
+
+    @Override
     public OpenSslSessionId sessionId() {
         return wrapped.sessionId();
     }
 
     @Override
-    public void setSessionId(OpenSslSessionId id) {
-        wrapped.setSessionId(id);
+    public void setSessionDetails(long creationTime, long lastAccessedTime, OpenSslSessionId id,
+                                  Map<String, Object> keyValueStorage) {
+        wrapped.setSessionDetails(creationTime, lastAccessedTime, id, keyValueStorage);
     }
 
     @Override
@@ -111,6 +120,11 @@ abstract class ExtendedOpenSslSession extends ExtendedSSLSession implements Open
     @Override
     public final long getLastAccessedTime() {
         return wrapped.getLastAccessedTime();
+    }
+
+    @Override
+    public void setLastAccessedTime(long time) {
+        wrapped.setLastAccessedTime(time);
     }
 
     @Override
@@ -155,6 +169,11 @@ abstract class ExtendedOpenSslSession extends ExtendedSSLSession implements Open
     @Override
     public final Certificate[] getPeerCertificates() throws SSLPeerUnverifiedException {
         return wrapped.getPeerCertificates();
+    }
+
+    @Override
+    public boolean hasPeerCertificates() {
+        return wrapped.hasPeerCertificates();
     }
 
     @Override
@@ -230,6 +249,16 @@ abstract class ExtendedOpenSslSession extends ExtendedSSLSession implements Open
     public void handshakeFinished(byte[] id, String cipher, String protocol, byte[] peerCertificate,
                                   byte[][] peerCertificateChain, long creationTime, long timeout) throws SSLException {
         wrapped.handshakeFinished(id, cipher, protocol, peerCertificate, peerCertificateChain, creationTime, timeout);
+    }
+
+    @Override
+    public boolean equals(Object o) {
+        return wrapped.equals(o);
+    }
+
+    @Override
+    public int hashCode() {
+        return wrapped.hashCode();
     }
 
     @Override

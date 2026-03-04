@@ -15,12 +15,9 @@
  */
 package io.netty.channel;
 
-import java.util.ArrayList;
-import java.util.List;
+import io.netty.util.internal.AdaptiveCalculator;
 
 import static io.netty.util.internal.ObjectUtil.checkPositive;
-import static java.lang.Math.max;
-import static java.lang.Math.min;
 
 /**
  * The {@link RecvByteBufAllocator} that automatically increases and
@@ -34,32 +31,10 @@ import static java.lang.Math.min;
  */
 public class AdaptiveRecvByteBufAllocator extends DefaultMaxMessagesRecvByteBufAllocator {
 
-    static final int DEFAULT_MINIMUM = 64;
+    public static final int DEFAULT_MINIMUM = 64;
     // Use an initial value that is bigger than the common MTU of 1500
-    static final int DEFAULT_INITIAL = 2048;
-    static final int DEFAULT_MAXIMUM = 65536;
-
-    private static final int INDEX_INCREMENT = 4;
-    private static final int INDEX_DECREMENT = 1;
-
-    private static final int[] SIZE_TABLE;
-
-    static {
-        List<Integer> sizeTable = new ArrayList<Integer>();
-        for (int i = 16; i < 512; i += 16) {
-            sizeTable.add(i);
-        }
-
-        // Suppress a warning since i becomes negative when an integer overflow happens
-        for (int i = 512; i > 0; i <<= 1) { // lgtm[java/constant-comparison]
-            sizeTable.add(i);
-        }
-
-        SIZE_TABLE = new int[sizeTable.size()];
-        for (int i = 0; i < SIZE_TABLE.length; i ++) {
-            SIZE_TABLE[i] = sizeTable.get(i);
-        }
-    }
+    public static final int DEFAULT_INITIAL = 2048;
+    public static final int DEFAULT_MAXIMUM = 65536;
 
     /**
      * @deprecated There is state for {@link #maxMessagesPerRead()} which is typically based upon channel type.
@@ -67,43 +42,11 @@ public class AdaptiveRecvByteBufAllocator extends DefaultMaxMessagesRecvByteBufA
     @Deprecated
     public static final AdaptiveRecvByteBufAllocator DEFAULT = new AdaptiveRecvByteBufAllocator();
 
-    private static int getSizeTableIndex(final int size) {
-        for (int low = 0, high = SIZE_TABLE.length - 1;;) {
-            if (high < low) {
-                return low;
-            }
-            if (high == low) {
-                return high;
-            }
-
-            int mid = low + high >>> 1;
-            int a = SIZE_TABLE[mid];
-            int b = SIZE_TABLE[mid + 1];
-            if (size > b) {
-                low = mid + 1;
-            } else if (size < a) {
-                high = mid - 1;
-            } else if (size == a) {
-                return mid;
-            } else {
-                return mid + 1;
-            }
-        }
-    }
-
     private final class HandleImpl extends MaxMessageHandle {
-        private final int minIndex;
-        private final int maxIndex;
-        private int index;
-        private int nextReceiveBufferSize;
-        private boolean decreaseNow;
+        private final AdaptiveCalculator calculator;
 
-        HandleImpl(int minIndex, int maxIndex, int initial) {
-            this.minIndex = minIndex;
-            this.maxIndex = maxIndex;
-
-            index = getSizeTableIndex(initial);
-            nextReceiveBufferSize = SIZE_TABLE[index];
+        HandleImpl(int minimum, int initial, int maximum) {
+            calculator = new AdaptiveCalculator(minimum, initial, maximum);
         }
 
         @Override
@@ -113,41 +56,25 @@ public class AdaptiveRecvByteBufAllocator extends DefaultMaxMessagesRecvByteBufA
             // the selector to check for more data. Going back to the selector can add significant latency for large
             // data transfers.
             if (bytes == attemptedBytesRead()) {
-                record(bytes);
+                calculator.record(bytes);
             }
             super.lastBytesRead(bytes);
         }
 
         @Override
         public int guess() {
-            return nextReceiveBufferSize;
-        }
-
-        private void record(int actualReadBytes) {
-            if (actualReadBytes <= SIZE_TABLE[max(0, index - INDEX_DECREMENT)]) {
-                if (decreaseNow) {
-                    index = max(index - INDEX_DECREMENT, minIndex);
-                    nextReceiveBufferSize = SIZE_TABLE[index];
-                    decreaseNow = false;
-                } else {
-                    decreaseNow = true;
-                }
-            } else if (actualReadBytes >= nextReceiveBufferSize) {
-                index = min(index + INDEX_INCREMENT, maxIndex);
-                nextReceiveBufferSize = SIZE_TABLE[index];
-                decreaseNow = false;
-            }
+            return calculator.nextSize();
         }
 
         @Override
         public void readComplete() {
-            record(totalBytesRead());
+            calculator.record(totalBytesRead());
         }
     }
 
-    private final int minIndex;
-    private final int maxIndex;
+    private final int minimum;
     private final int initial;
+    private final int maximum;
 
     /**
      * Creates a new predictor with the default parameters.  With the default
@@ -174,27 +101,15 @@ public class AdaptiveRecvByteBufAllocator extends DefaultMaxMessagesRecvByteBufA
             throw new IllegalArgumentException("maximum: " + maximum);
         }
 
-        int minIndex = getSizeTableIndex(minimum);
-        if (SIZE_TABLE[minIndex] < minimum) {
-            this.minIndex = minIndex + 1;
-        } else {
-            this.minIndex = minIndex;
-        }
-
-        int maxIndex = getSizeTableIndex(maximum);
-        if (SIZE_TABLE[maxIndex] > maximum) {
-            this.maxIndex = maxIndex - 1;
-        } else {
-            this.maxIndex = maxIndex;
-        }
-
+        this.minimum = minimum;
         this.initial = initial;
+        this.maximum = maximum;
     }
 
     @SuppressWarnings("deprecation")
     @Override
     public Handle newHandle() {
-        return new HandleImpl(minIndex, maxIndex, initial);
+        return new HandleImpl(minimum, initial, maximum);
     }
 
     @Override

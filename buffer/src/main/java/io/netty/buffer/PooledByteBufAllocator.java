@@ -51,6 +51,7 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
     private static final boolean DEFAULT_USE_CACHE_FOR_ALL_THREADS;
     private static final int DEFAULT_DIRECT_MEMORY_CACHE_ALIGNMENT;
     static final int DEFAULT_MAX_CACHED_BYTEBUFFERS_PER_CHUNK;
+    private static final boolean DEFAULT_DISABLE_CACHE_FINALIZERS_FOR_FAST_THREAD_LOCAL_THREADS;
 
     private static final int MIN_PAGE_SIZE = 4096;
     private static final int MAX_CHUNK_SIZE = (int) (((long) Integer.MAX_VALUE + 1) / 2);
@@ -148,6 +149,9 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
         DEFAULT_USE_CACHE_FOR_ALL_THREADS = SystemPropertyUtil.getBoolean(
                 "io.netty.allocator.useCacheForAllThreads", false);
 
+        DEFAULT_DISABLE_CACHE_FINALIZERS_FOR_FAST_THREAD_LOCAL_THREADS = SystemPropertyUtil.getBoolean(
+                "io.netty.allocator.disableCacheFinalizersForFastThreadLocalThreads", false);
+
         // Use 1023 by default as we use an ArrayDeque as backing storage which will then allocate an internal array
         // of 1024 elements. Otherwise we would allocate 2048 and only use 1024 which is wasteful.
         DEFAULT_MAX_CACHED_BYTEBUFFERS_PER_CHUNK = SystemPropertyUtil.getInt(
@@ -175,11 +179,13 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
             logger.debug("-Dio.netty.allocator.useCacheForAllThreads: {}", DEFAULT_USE_CACHE_FOR_ALL_THREADS);
             logger.debug("-Dio.netty.allocator.maxCachedByteBuffersPerChunk: {}",
                     DEFAULT_MAX_CACHED_BYTEBUFFERS_PER_CHUNK);
+            logger.debug("-Dio.netty.allocator.disableCacheFinalizersForFastThreadLocalThreads: {}",
+                         DEFAULT_DISABLE_CACHE_FINALIZERS_FOR_FAST_THREAD_LOCAL_THREADS);
         }
     }
 
     public static final PooledByteBufAllocator DEFAULT =
-            new PooledByteBufAllocator(PlatformDependent.directBufferPreferred());
+            new PooledByteBufAllocator(!PlatformDependent.isExplicitNoPreferDirect());
 
     private final PoolArena<byte[]>[] heapArenas;
     private final PoolArena<ByteBuffer>[] directArenas;
@@ -300,9 +306,9 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
         if (nHeapArena > 0) {
             heapArenas = newArenaArray(nHeapArena);
             List<PoolArenaMetric> metrics = new ArrayList<PoolArenaMetric>(heapArenas.length);
+            final SizeClasses sizeClasses = new SizeClasses(pageSize, pageShifts, chunkSize, 0);
             for (int i = 0; i < heapArenas.length; i ++) {
-                PoolArena.HeapArena arena = new PoolArena.HeapArena(this,
-                        pageSize, pageShifts, chunkSize);
+                PoolArena.HeapArena arena = new PoolArena.HeapArena(this, sizeClasses);
                 heapArenas[i] = arena;
                 metrics.add(arena);
             }
@@ -315,9 +321,10 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
         if (nDirectArena > 0) {
             directArenas = newArenaArray(nDirectArena);
             List<PoolArenaMetric> metrics = new ArrayList<PoolArenaMetric>(directArenas.length);
+            final SizeClasses sizeClasses = new SizeClasses(pageSize, pageShifts, chunkSize,
+                    directMemoryCacheAlignment);
             for (int i = 0; i < directArenas.length; i ++) {
-                PoolArena.DirectArena arena = new PoolArena.DirectArena(
-                        this, pageSize, pageShifts, chunkSize, directMemoryCacheAlignment);
+                PoolArena.DirectArena arena = new PoolArena.DirectArena(this, sizeClasses);
                 directArenas[i] = arena;
                 metrics.add(arena);
             }
@@ -374,15 +381,15 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
         PoolThreadCache cache = threadCache.get();
         PoolArena<byte[]> heapArena = cache.heapArena;
 
-        final ByteBuf buf;
+        final AbstractByteBuf buf;
         if (heapArena != null) {
             buf = heapArena.allocate(cache, initialCapacity, maxCapacity);
         } else {
             buf = PlatformDependent.hasUnsafe() ?
                     new UnpooledUnsafeHeapByteBuf(this, initialCapacity, maxCapacity) :
                     new UnpooledHeapByteBuf(this, initialCapacity, maxCapacity);
+            onAllocateBuffer(buf, false, false);
         }
-
         return toLeakAwareBuffer(buf);
     }
 
@@ -391,15 +398,15 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
         PoolThreadCache cache = threadCache.get();
         PoolArena<ByteBuffer> directArena = cache.directArena;
 
-        final ByteBuf buf;
+        final AbstractByteBuf buf;
         if (directArena != null) {
             buf = directArena.allocate(cache, initialCapacity, maxCapacity);
         } else {
             buf = PlatformDependent.hasUnsafe() ?
                     UnsafeByteBufUtil.newUnsafeDirectByteBuf(this, initialCapacity, maxCapacity) :
                     new UnpooledDirectByteBuf(this, initialCapacity, maxCapacity);
+            onAllocateBuffer(buf, false, false);
         }
-
         return toLeakAwareBuffer(buf);
     }
 
@@ -429,6 +436,14 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
      */
     public static int defaultMaxOrder() {
         return DEFAULT_MAX_ORDER;
+    }
+
+    /**
+     * Default control creation of PoolThreadCache finalizers for FastThreadLocalThreads -
+     * System Property: io.netty.allocator.disableCacheFinalizersForFastThreadLocalThreads - default false
+     */
+    public static boolean defaultDisableCacheFinalizersForFastThreadLocalThreads() {
+        return DEFAULT_DISABLE_CACHE_FINALIZERS_FOR_FAST_THREAD_LOCAL_THREADS;
     }
 
     /**
@@ -517,13 +532,13 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
 
             if (useCacheForAllThreads ||
                     // If the current thread is a FastThreadLocalThread we will always use the cache
-                    current instanceof FastThreadLocalThread ||
+                    FastThreadLocalThread.currentThreadHasFastThreadLocal() ||
                     // The Thread is used by an EventExecutor, let's use the cache as the chances are good that we
                     // will allocate a lot!
                     executor != null) {
                 final PoolThreadCache cache = new PoolThreadCache(
                         heapArena, directArena, smallCacheSize, normalCacheSize,
-                        DEFAULT_MAX_CACHED_BUFFER_CAPACITY, DEFAULT_CACHE_TRIM_INTERVAL);
+                        DEFAULT_MAX_CACHED_BUFFER_CAPACITY, DEFAULT_CACHE_TRIM_INTERVAL, useCacheFinalizers());
 
                 if (DEFAULT_CACHE_TRIM_INTERVAL_MILLIS > 0) {
                     if (executor != null) {
@@ -534,7 +549,7 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
                 return cache;
             }
             // No caching so just use 0 as sizes.
-            return new PoolThreadCache(heapArena, directArena, 0, 0, 0, 0);
+            return new PoolThreadCache(heapArena, directArena, 0, 0, 0, 0, false);
         }
 
         @Override
@@ -562,6 +577,13 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
 
             return minArena;
         }
+    }
+
+    private static boolean useCacheFinalizers() {
+        if (!defaultDisableCacheFinalizersForFastThreadLocalThreads()) {
+            return true;
+        }
+        return FastThreadLocalThread.currentThreadWillCleanupFastThreadLocals();
     }
 
     @Override
@@ -616,7 +638,10 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
      */
     @Deprecated
     public int numThreadLocalCaches() {
-        PoolArena<?>[] arenas = heapArenas != null ? heapArenas : directArenas;
+        return Math.max(numThreadLocalCaches(heapArenas), numThreadLocalCaches(directArenas));
+    }
+
+    private static int numThreadLocalCaches(PoolArena<?>[] arenas) {
         if (arenas == null) {
             return 0;
         }
@@ -774,5 +799,61 @@ public class PooledByteBufAllocator extends AbstractByteBufAllocator implements 
         }
 
         return buf.toString();
+    }
+
+    static void onAllocateBuffer(AbstractByteBuf buf, boolean pooled, boolean threadLocal) {
+        if (PlatformDependent.isJfrEnabled() && AllocateBufferEvent.isEventEnabled()) {
+            AllocateBufferEvent event = new AllocateBufferEvent();
+            if (event.shouldCommit()) {
+                event.fill(buf, PooledByteBufAllocator.class);
+                event.chunkPooled = pooled;
+                event.chunkThreadLocal = threadLocal;
+                event.commit();
+            }
+        }
+    }
+
+    static void onDeallocateBuffer(AbstractByteBuf buf) {
+        if (PlatformDependent.isJfrEnabled() && FreeBufferEvent.isEventEnabled()) {
+            FreeBufferEvent event = new FreeBufferEvent();
+            if (event.shouldCommit()) {
+                event.fill(buf, PooledByteBufAllocator.class);
+                event.commit();
+            }
+        }
+    }
+
+    static void onReallocateBuffer(AbstractByteBuf buf, int newCapacity) {
+        if (PlatformDependent.isJfrEnabled() && ReallocateBufferEvent.isEventEnabled()) {
+            ReallocateBufferEvent event = new ReallocateBufferEvent();
+            if (event.shouldCommit()) {
+                event.fill(buf, PooledByteBufAllocator.class);
+                event.newCapacity = newCapacity;
+                event.commit();
+            }
+        }
+    }
+
+    static void onAllocateChunk(ChunkInfo chunk, boolean pooled) {
+        if (PlatformDependent.isJfrEnabled() && AllocateChunkEvent.isEventEnabled()) {
+            AllocateChunkEvent event = new AllocateChunkEvent();
+            if (event.shouldCommit()) {
+                event.fill(chunk, PooledByteBufAllocator.class);
+                event.pooled = pooled;
+                event.threadLocal = false; // Chunks in the pooled allocator are always shared.
+                event.commit();
+            }
+        }
+    }
+
+    static void onDeallocateChunk(ChunkInfo chunk, boolean pooled) {
+        if (PlatformDependent.isJfrEnabled() && FreeChunkEvent.isEventEnabled()) {
+            FreeChunkEvent event = new FreeChunkEvent();
+            if (event.shouldCommit()) {
+                event.fill(chunk, PooledByteBufAllocator.class);
+                event.pooled = pooled;
+                event.commit();
+            }
+        }
     }
 }

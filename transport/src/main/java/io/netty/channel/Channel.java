@@ -157,20 +157,40 @@ public interface Channel extends AttributeMap, ChannelOutboundInvoker, Comparabl
      * requested write operation immediately.  Any write requests made when
      * this method returns {@code false} are queued until the I/O thread is
      * ready to process the queued write requests.
+     *
+     * {@link WriteBufferWaterMark} can be used to configure on which condition
+     * the write buffer would cause this channel to change writability.
      */
-    boolean isWritable();
+    default boolean isWritable() {
+        ChannelOutboundBuffer buf = unsafe().outboundBuffer();
+        return buf != null && buf.isWritable();
+    }
 
     /**
      * Get how many bytes can be written until {@link #isWritable()} returns {@code false}.
      * This quantity will always be non-negative. If {@link #isWritable()} is {@code false} then 0.
+     *
+     * {@link WriteBufferWaterMark} can be used to define writability settings.
      */
-    long bytesBeforeUnwritable();
+    default long bytesBeforeUnwritable() {
+        ChannelOutboundBuffer buf = unsafe().outboundBuffer();
+        // isWritable() is currently assuming if there is no outboundBuffer then the channel is not writable.
+        // We should be consistent with that here.
+        return buf != null ? buf.bytesBeforeUnwritable() : 0;
+    }
 
     /**
      * Get how many bytes must be drained from underlying buffers until {@link #isWritable()} returns {@code true}.
      * This quantity will always be non-negative. If {@link #isWritable()} is {@code true} then 0.
+     *
+     * {@link WriteBufferWaterMark} can be used to define writability settings.
      */
-    long bytesBeforeWritable();
+    default long bytesBeforeWritable() {
+        ChannelOutboundBuffer buf = unsafe().outboundBuffer();
+        // isWritable() is currently assuming if there is no outboundBuffer then the channel is not writable.
+        // We should be consistent with that here.
+        return buf != null ? buf.bytesBeforeWritable() : Long.MAX_VALUE;
+    }
 
     /**
      * Returns an <em>internal-use-only</em> object that provides unsafe operations.
@@ -185,13 +205,157 @@ public interface Channel extends AttributeMap, ChannelOutboundInvoker, Comparabl
     /**
      * Return the assigned {@link ByteBufAllocator} which will be used to allocate {@link ByteBuf}s.
      */
-    ByteBufAllocator alloc();
+    default ByteBufAllocator alloc() {
+        return config().getAllocator();
+    }
+
+    /**
+     * Return the value of the given {@link ChannelOption}
+     */
+    default <T> T getOption(ChannelOption<T> option) {
+        return config().getOption(option);
+    }
+
+    /**
+     * Sets a configuration property with the specified name and value.
+     * To override this method properly, you must call the super class:
+     * <pre>
+     * public boolean setOption(ChannelOption&lt;T&gt; option, T value) {
+     *     if (super.setOption(option, value)) {
+     *         return true;
+     *     }
+     *
+     *     if (option.equals(additionalOption)) {
+     *         ....
+     *         return true;
+     *     }
+     *
+     *     return false;
+     * }
+     * </pre>
+     *
+     * @return {@code true} if and only if the property has been set
+     */
+    default <T> boolean setOption(ChannelOption<T> option, T value) {
+        return config().setOption(option, value);
+    }
 
     @Override
-    Channel read();
+    default Channel read() {
+        pipeline().read();
+        return this;
+    }
 
     @Override
-    Channel flush();
+    default Channel flush() {
+        pipeline().flush();
+        return this;
+    }
+
+    @Override
+    default ChannelFuture writeAndFlush(Object msg) {
+        return pipeline().writeAndFlush(msg);
+    }
+
+    @Override
+    default ChannelFuture writeAndFlush(Object msg, ChannelPromise promise) {
+        return pipeline().writeAndFlush(msg, promise);
+    }
+
+    @Override
+    default ChannelFuture write(Object msg, ChannelPromise promise) {
+        return pipeline().write(msg, promise);
+    }
+
+    @Override
+    default ChannelFuture write(Object msg) {
+        return pipeline().write(msg);
+    }
+
+    @Override
+    default ChannelFuture deregister(ChannelPromise promise) {
+        return pipeline().deregister(promise);
+    }
+
+    @Override
+    default ChannelFuture close(ChannelPromise promise) {
+        return pipeline().close(promise);
+    }
+
+    @Override
+    default ChannelFuture disconnect(ChannelPromise promise) {
+        return pipeline().disconnect(promise);
+    }
+
+    @Override
+    default ChannelFuture connect(SocketAddress remoteAddress, SocketAddress localAddress, ChannelPromise promise) {
+        return pipeline().connect(remoteAddress, localAddress, promise);
+    }
+
+    @Override
+    default ChannelFuture connect(SocketAddress remoteAddress, ChannelPromise promise) {
+        return pipeline().connect(remoteAddress, promise);
+    }
+
+    @Override
+    default ChannelFuture bind(SocketAddress localAddress, ChannelPromise promise) {
+        return pipeline().bind(localAddress, promise);
+    }
+
+    @Override
+    default ChannelFuture deregister() {
+        return pipeline().deregister();
+    }
+
+    @Override
+    default ChannelFuture close() {
+        return pipeline().close();
+    }
+
+    @Override
+    default ChannelFuture disconnect() {
+        return pipeline().disconnect();
+    }
+
+    @Override
+    default ChannelFuture connect(SocketAddress remoteAddress, SocketAddress localAddress) {
+        return pipeline().connect(remoteAddress, localAddress);
+    }
+
+    @Override
+    default ChannelFuture connect(SocketAddress remoteAddress) {
+        return pipeline().connect(remoteAddress);
+    }
+
+    @Override
+    default ChannelFuture bind(SocketAddress localAddress) {
+        return pipeline().bind(localAddress);
+    }
+
+    @Override
+    default ChannelPromise newPromise() {
+        return pipeline().newPromise();
+    }
+
+    @Override
+    default ChannelProgressivePromise newProgressivePromise() {
+        return pipeline().newProgressivePromise();
+    }
+
+    @Override
+    default ChannelFuture newSucceededFuture() {
+        return pipeline().newSucceededFuture();
+    }
+
+    @Override
+    default ChannelFuture newFailedFuture(Throwable cause) {
+        return pipeline().newFailedFuture(cause);
+    }
+
+    @Override
+    default ChannelPromise voidPromise() {
+        return pipeline().voidPromise();
+    }
 
     /**
      * <em>Unsafe</em> operations that should <em>never</em> be called from user-code. These methods

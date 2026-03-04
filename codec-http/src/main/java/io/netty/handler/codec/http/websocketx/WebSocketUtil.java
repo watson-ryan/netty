@@ -15,16 +15,12 @@
  */
 package io.netty.handler.codec.http.websocketx;
 
-import io.netty.buffer.ByteBuf;
-import io.netty.buffer.Unpooled;
-import io.netty.handler.codec.base64.Base64;
-import io.netty.util.CharsetUtil;
 import io.netty.util.concurrent.FastThreadLocal;
-import io.netty.util.internal.PlatformDependent;
-import io.netty.util.internal.SuppressJava6Requirement;
 
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
+import java.util.Base64;
+import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * A utility class mainly for use by web sockets
@@ -38,7 +34,7 @@ final class WebSocketUtil {
                 //Try to get a MessageDigest that uses MD5
                 //Suppress a warning about weak hash algorithm
                 //since it's defined in draft-ietf-hybi-thewebsocketprotocol-00
-                return MessageDigest.getInstance("MD5"); // lgtm [java/weak-cryptographic-algorithm]
+                return MessageDigest.getInstance("MD5");
             } catch (NoSuchAlgorithmException e) {
                 //This shouldn't happen! How old is the computer?
                 throw new InternalError("MD5 not supported on this platform - Outdated?");
@@ -53,7 +49,7 @@ final class WebSocketUtil {
                 //Try to get a MessageDigest that uses SHA1
                 //Suppress a warning about weak hash algorithm
                 //since it's defined in draft-ietf-hybi-thewebsocketprotocol-00
-                return MessageDigest.getInstance("SHA1"); // lgtm [java/weak-cryptographic-algorithm]
+                return MessageDigest.getInstance("SHA1");
             } catch (NoSuchAlgorithmException e) {
                 //This shouldn't happen! How old is the computer?
                 throw new InternalError("SHA-1 not supported on this platform - Outdated?");
@@ -95,24 +91,8 @@ final class WebSocketUtil {
      * @param data The data to encode
      * @return An encoded string containing the data
      */
-    @SuppressJava6Requirement(reason = "Guarded with java version check")
     static String base64(byte[] data) {
-        if (PlatformDependent.javaVersion() >= 8) {
-            return java.util.Base64.getEncoder().encodeToString(data);
-        }
-        String encodedString;
-        ByteBuf encodedData = Unpooled.wrappedBuffer(data);
-        try {
-            ByteBuf encoded = Base64.encode(encodedData);
-            try {
-                encodedString = encoded.toString(CharsetUtil.UTF_8);
-            } finally {
-                encoded.release();
-            }
-        } finally {
-            encodedData.release();
-        }
-        return encodedString;
+        return Base64.getEncoder().encodeToString(data);
     }
 
     /**
@@ -123,7 +103,7 @@ final class WebSocketUtil {
      */
     static byte[] randomBytes(int size) {
         byte[] bytes = new byte[size];
-        PlatformDependent.threadLocalRandom().nextBytes(bytes);
+        ThreadLocalRandom.current().nextBytes(bytes);
         return bytes;
     }
 
@@ -136,7 +116,7 @@ final class WebSocketUtil {
      */
     static int randomNumber(int minimum, int maximum) {
         assert minimum < maximum;
-        double fraction = PlatformDependent.threadLocalRandom().nextDouble();
+        double fraction = ThreadLocalRandom.current().nextDouble();
 
         // the idea here is that nextDouble gives us a random value
         //
@@ -158,6 +138,10 @@ final class WebSocketUtil {
         //
         //       min <= min + fraction * dist <= max
         return (int) (minimum + fraction * (maximum - minimum));
+    }
+
+    static int byteAtIndex(int mask, int index) {
+        return (mask >> 8 * (3 - index)) & 0xFF;
     }
 
     /**

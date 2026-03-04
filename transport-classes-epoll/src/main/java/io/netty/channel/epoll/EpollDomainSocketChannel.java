@@ -23,7 +23,6 @@ import io.netty.channel.unix.DomainSocketAddress;
 import io.netty.channel.unix.DomainSocketChannel;
 import io.netty.channel.unix.FileDescriptor;
 import io.netty.channel.unix.PeerCredentials;
-import io.netty.util.internal.UnstableApi;
 
 import java.io.IOException;
 import java.net.SocketAddress;
@@ -41,7 +40,7 @@ public final class EpollDomainSocketChannel extends AbstractEpollStreamChannel i
     }
 
     EpollDomainSocketChannel(Channel parent, FileDescriptor fd) {
-        super(parent, new LinuxSocket(fd.intValue()));
+        this(parent, new LinuxSocket(fd.intValue()));
     }
 
     public EpollDomainSocketChannel(int fd) {
@@ -50,6 +49,8 @@ public final class EpollDomainSocketChannel extends AbstractEpollStreamChannel i
 
     public EpollDomainSocketChannel(Channel parent, LinuxSocket fd) {
         super(parent, fd);
+        local = fd.localDomainSocketAddress();
+        remote = fd.remoteDomainSocketAddress();
     }
 
     public EpollDomainSocketChannel(int fd, boolean active) {
@@ -85,7 +86,7 @@ public final class EpollDomainSocketChannel extends AbstractEpollStreamChannel i
     @Override
     protected boolean doConnect(SocketAddress remoteAddress, SocketAddress localAddress) throws Exception {
         if (super.doConnect(remoteAddress, localAddress)) {
-            local = (DomainSocketAddress) localAddress;
+            local = localAddress != null ? (DomainSocketAddress) localAddress : socket.localDomainSocketAddress();
             remote = (DomainSocketAddress) remoteAddress;
             return true;
         }
@@ -125,7 +126,6 @@ public final class EpollDomainSocketChannel extends AbstractEpollStreamChannel i
      * Returns the unix credentials (uid, gid, pid) of the peer
      * <a href=https://man7.org/linux/man-pages/man7/socket.7.html>SO_PEERCRED</a>
      */
-    @UnstableApi
     public PeerCredentials peerCredentials() throws IOException {
         return socket.getPeerCredentials();
     }
@@ -141,7 +141,7 @@ public final class EpollDomainSocketChannel extends AbstractEpollStreamChannel i
                     epollInReadFd();
                     break;
                 default:
-                    throw new Error();
+                    throw new Error("Unexpected read mode: " + config().getReadMode());
             }
         }
 
@@ -152,11 +152,9 @@ public final class EpollDomainSocketChannel extends AbstractEpollStreamChannel i
             }
             final ChannelConfig config = config();
             final EpollRecvByteAllocatorHandle allocHandle = recvBufAllocHandle();
-            allocHandle.edgeTriggered(isFlagSet(Native.EPOLLET));
 
             final ChannelPipeline pipeline = pipeline();
             allocHandle.reset(config);
-            epollInBefore();
 
             try {
                 readLoop: do {
@@ -185,7 +183,9 @@ public final class EpollDomainSocketChannel extends AbstractEpollStreamChannel i
                 pipeline.fireChannelReadComplete();
                 pipeline.fireExceptionCaught(t);
             } finally {
-                epollInFinally(config);
+                if (shouldStopReading(config)) {
+                    clearEpollIn();
+                }
             }
         }
     }

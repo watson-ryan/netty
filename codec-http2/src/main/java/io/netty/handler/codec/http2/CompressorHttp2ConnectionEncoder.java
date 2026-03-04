@@ -16,8 +16,12 @@ package io.netty.handler.codec.http2;
 
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
+import io.netty.channel.Channel;
+import io.netty.channel.ChannelConfig;
 import io.netty.channel.ChannelFuture;
+import io.netty.channel.ChannelHandler;
 import io.netty.channel.ChannelHandlerContext;
+import io.netty.channel.ChannelId;
 import io.netty.channel.ChannelPromise;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.handler.codec.ByteToMessageDecoder;
@@ -30,11 +34,16 @@ import io.netty.handler.codec.compression.CompressionOptions;
 import io.netty.handler.codec.compression.DeflateOptions;
 import io.netty.handler.codec.compression.GzipOptions;
 import io.netty.handler.codec.compression.StandardCompressionOptions;
+import io.netty.handler.codec.compression.Zstd;
 import io.netty.handler.codec.compression.ZstdEncoder;
 import io.netty.handler.codec.compression.ZstdOptions;
+import io.netty.handler.codec.compression.SnappyFrameEncoder;
+import io.netty.handler.codec.compression.SnappyOptions;
 import io.netty.util.concurrent.PromiseCombiner;
 import io.netty.util.internal.ObjectUtil;
-import io.netty.util.internal.UnstableApi;
+
+import java.util.ArrayList;
+import java.util.List;
 
 import static io.netty.handler.codec.http.HttpHeaderNames.CONTENT_ENCODING;
 import static io.netty.handler.codec.http.HttpHeaderNames.CONTENT_LENGTH;
@@ -45,12 +54,12 @@ import static io.netty.handler.codec.http.HttpHeaderValues.IDENTITY;
 import static io.netty.handler.codec.http.HttpHeaderValues.X_DEFLATE;
 import static io.netty.handler.codec.http.HttpHeaderValues.X_GZIP;
 import static io.netty.handler.codec.http.HttpHeaderValues.ZSTD;
+import static io.netty.handler.codec.http.HttpHeaderValues.SNAPPY;
 
 /**
  * A decorating HTTP2 encoder that will compress data frames according to the {@code content-encoding} header for each
  * stream. The compression provided by this class will be applied to the data for the entire stream.
  */
-@UnstableApi
 public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionEncoder {
     // We cannot remove this because it'll be breaking change
     public static final int DEFAULT_COMPRESSION_LEVEL = 6;
@@ -68,6 +77,7 @@ public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionE
     private GzipOptions gzipCompressionOptions;
     private DeflateOptions deflateOptions;
     private ZstdOptions zstdOptions;
+    private SnappyOptions snappyOptions;
 
     /**
      * Create a new {@link CompressorHttp2ConnectionEncoder} instance
@@ -78,13 +88,17 @@ public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionE
     }
 
     private static CompressionOptions[] defaultCompressionOptions() {
+        List<CompressionOptions> compressionOptions = new ArrayList<CompressionOptions>();
+        compressionOptions.add(StandardCompressionOptions.gzip());
+        compressionOptions.add(StandardCompressionOptions.deflate());
+        compressionOptions.add(StandardCompressionOptions.snappy());
         if (Brotli.isAvailable()) {
-            return new CompressionOptions[] {
-                    StandardCompressionOptions.brotli(),
-                    StandardCompressionOptions.gzip(),
-                    StandardCompressionOptions.deflate() };
+            compressionOptions.add(StandardCompressionOptions.brotli());
         }
-        return new CompressionOptions[] { StandardCompressionOptions.gzip(), StandardCompressionOptions.deflate() };
+        if (Zstd.isAvailable()) {
+            compressionOptions.add(StandardCompressionOptions.zstd());
+        }
+        return compressionOptions.toArray(new CompressionOptions[0]);
     }
 
     /**
@@ -137,6 +151,8 @@ public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionE
                 deflateOptions = (DeflateOptions) compressionOptions;
             } else if (compressionOptions instanceof ZstdOptions) {
                 zstdOptions = (ZstdOptions) compressionOptions;
+            } else if (compressionOptions instanceof SnappyOptions) {
+                snappyOptions = (SnappyOptions) compressionOptions;
             } else {
                 throw new IllegalArgumentException("Unsupported " + CompressionOptions.class.getSimpleName() +
                         ": " + compressionOptions);
@@ -274,14 +290,31 @@ public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionE
         if (DEFLATE.contentEqualsIgnoreCase(contentEncoding) || X_DEFLATE.contentEqualsIgnoreCase(contentEncoding)) {
             return newCompressionChannel(ctx, ZlibWrapper.ZLIB);
         }
+        Channel channel = ctx.channel();
         if (Brotli.isAvailable() && brotliOptions != null && BR.contentEqualsIgnoreCase(contentEncoding)) {
-            return new EmbeddedChannel(ctx.channel().id(), ctx.channel().metadata().hasDisconnect(),
-                    ctx.channel().config(), new BrotliEncoder(brotliOptions.parameters()));
+            return EmbeddedChannel.builder()
+                    .channelId(channel.id())
+                    .hasDisconnect(channel.metadata().hasDisconnect())
+                    .config(channel.config())
+                    .handlers(new BrotliEncoder(brotliOptions.parameters()))
+                    .build();
         }
         if (zstdOptions != null && ZSTD.contentEqualsIgnoreCase(contentEncoding)) {
-            return new EmbeddedChannel(ctx.channel().id(), ctx.channel().metadata().hasDisconnect(),
-                    ctx.channel().config(), new ZstdEncoder(zstdOptions.compressionLevel(),
-                    zstdOptions.blockSize(), zstdOptions.maxEncodeSize()));
+            return EmbeddedChannel.builder()
+                    .channelId(channel.id())
+                    .hasDisconnect(channel.metadata().hasDisconnect())
+                    .config(channel.config())
+                    .handlers(new ZstdEncoder(zstdOptions.compressionLevel(),
+                            zstdOptions.blockSize(), zstdOptions.maxEncodeSize()))
+                    .build();
+        }
+        if (snappyOptions != null && SNAPPY.contentEqualsIgnoreCase(contentEncoding)) {
+            return EmbeddedChannel.builder()
+                    .channelId(channel.id())
+                    .hasDisconnect(channel.metadata().hasDisconnect())
+                    .config(channel.config())
+                    .handlers(new SnappyFrameEncoder())
+                    .build();
         }
         // 'identity' or unsupported
         return null;
@@ -305,24 +338,40 @@ public class CompressorHttp2ConnectionEncoder extends DecoratingHttp2ConnectionE
      * @param wrapper Defines what type of encoder should be used
      */
     private EmbeddedChannel newCompressionChannel(final ChannelHandlerContext ctx, ZlibWrapper wrapper) {
+        Channel channel = ctx.channel();
         if (supportsCompressionOptions) {
             if (wrapper == ZlibWrapper.GZIP && gzipCompressionOptions != null) {
-                return new EmbeddedChannel(ctx.channel().id(), ctx.channel().metadata().hasDisconnect(),
-                        ctx.channel().config(), ZlibCodecFactory.newZlibEncoder(wrapper,
-                        gzipCompressionOptions.compressionLevel(), gzipCompressionOptions.windowBits(),
-                        gzipCompressionOptions.memLevel()));
+                return EmbeddedChannel.builder()
+                        .channelId(channel.id())
+                        .hasDisconnect(channel.metadata().hasDisconnect())
+                        .config(channel.config())
+                        .handlers(ZlibCodecFactory.newZlibEncoder(wrapper,
+                                gzipCompressionOptions.compressionLevel(),
+                                gzipCompressionOptions.windowBits(),
+                                gzipCompressionOptions.memLevel())
+                        )
+                        .build();
             } else if (wrapper == ZlibWrapper.ZLIB && deflateOptions != null) {
-                return new EmbeddedChannel(ctx.channel().id(), ctx.channel().metadata().hasDisconnect(),
-                        ctx.channel().config(), ZlibCodecFactory.newZlibEncoder(wrapper,
-                        deflateOptions.compressionLevel(), deflateOptions.windowBits(),
-                        deflateOptions.memLevel()));
+                return EmbeddedChannel.builder()
+                        .channelId(channel.id())
+                        .hasDisconnect(channel.metadata().hasDisconnect())
+                        .config(channel.config())
+                        .handlers(ZlibCodecFactory.newZlibEncoder(wrapper,
+                                deflateOptions.compressionLevel(),
+                                deflateOptions.windowBits(),
+                                deflateOptions.memLevel())
+                        )
+                        .build();
             } else {
                 throw new IllegalArgumentException("Unsupported ZlibWrapper: " + wrapper);
             }
         } else {
-            return new EmbeddedChannel(ctx.channel().id(), ctx.channel().metadata().hasDisconnect(),
-                    ctx.channel().config(), ZlibCodecFactory.newZlibEncoder(wrapper, compressionLevel, windowBits,
-                    memLevel));
+            return EmbeddedChannel.builder()
+                    .channelId(channel.id())
+                    .hasDisconnect(channel.metadata().hasDisconnect())
+                    .config(channel.config())
+                    .handlers(ZlibCodecFactory.newZlibEncoder(wrapper, compressionLevel, windowBits, memLevel))
+                    .build();
         }
     }
 

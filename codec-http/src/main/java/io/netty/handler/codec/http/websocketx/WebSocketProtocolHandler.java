@@ -60,6 +60,7 @@ abstract class WebSocketProtocolHandler extends MessageToMessageDecoder<WebSocke
     WebSocketProtocolHandler(boolean dropPongFrames,
                              WebSocketCloseStatus closeStatus,
                              long forceCloseTimeoutMillis) {
+        super(WebSocketFrame.class);
         this.dropPongFrames = dropPongFrames;
         this.closeStatus = closeStatus;
         this.forceCloseTimeoutMillis = forceCloseTimeoutMillis;
@@ -97,12 +98,7 @@ abstract class WebSocketProtocolHandler extends MessageToMessageDecoder<WebSocke
             }
             flush(ctx);
             applyCloseSentTimeout(ctx);
-            closeSent.addListener(new ChannelFutureListener() {
-                @Override
-                public void operationComplete(ChannelFuture future) {
-                    ctx.close(promise);
-                }
-            });
+            closeSent.addListener(future -> ctx.close(promise));
         }
     }
 
@@ -137,12 +133,7 @@ abstract class WebSocketProtocolHandler extends MessageToMessageDecoder<WebSocke
             }
         }, forceCloseTimeoutMillis, TimeUnit.MILLISECONDS);
 
-        closeSent.addListener(new ChannelFutureListener() {
-            @Override
-            public void operationComplete(ChannelFuture future) {
-                timeoutTask.cancel(false);
-            }
-        });
+        closeSent.addListener(future -> timeoutTask.cancel(false));
     }
 
     /**

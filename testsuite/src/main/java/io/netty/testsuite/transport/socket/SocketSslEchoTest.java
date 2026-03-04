@@ -34,11 +34,11 @@ import io.netty.handler.ssl.SslContextBuilder;
 import io.netty.handler.ssl.SslHandler;
 import io.netty.handler.ssl.SslHandshakeCompletionEvent;
 import io.netty.handler.ssl.SslProvider;
-import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.handler.stream.ChunkedWriteHandler;
+import io.netty.pkitesting.CertificateBuilder;
+import io.netty.pkitesting.X509Bundle;
 import io.netty.testsuite.util.TestUtils;
 import io.netty.util.concurrent.Future;
-import io.netty.util.concurrent.GenericFutureListener;
 import io.netty.util.internal.logging.InternalLogger;
 import io.netty.util.internal.logging.InternalLoggerFactory;
 import org.junit.jupiter.api.AfterAll;
@@ -50,7 +50,6 @@ import org.junit.jupiter.params.provider.MethodSource;
 import javax.net.ssl.SSLEngine;
 import java.io.File;
 import java.io.IOException;
-import java.security.cert.CertificateException;
 import java.util.ArrayList;
 import java.util.Collection;
 import java.util.List;
@@ -62,13 +61,13 @@ import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
 
-import static org.hamcrest.MatcherAssert.assertThat;
-import static org.hamcrest.Matchers.anyOf;
-import static org.hamcrest.Matchers.is;
-import static org.hamcrest.Matchers.not;
-import static org.hamcrest.Matchers.sameInstance;
+import static io.netty.testsuite.transport.TestsuitePermutation.randomBufferType;
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertSame;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 public class SocketSslEchoTest extends AbstractSocketTest {
 
@@ -83,14 +82,17 @@ public class SocketSslEchoTest extends AbstractSocketTest {
     static {
         random.nextBytes(data);
 
-        SelfSignedCertificate ssc;
         try {
-            ssc = new SelfSignedCertificate();
-        } catch (CertificateException e) {
-            throw new Error(e);
+            X509Bundle cert = new CertificateBuilder()
+                    .rsa2048()
+                    .subject("cn=localhost")
+                    .setIsCertificateAuthority(true)
+                    .buildSelfSigned();
+            CERT_FILE = cert.toTempCertChainPem();
+            KEY_FILE = cert.toTempPrivateKeyPem();
+        } catch (Exception e) {
+            throw new ExceptionInInitializerError(e);
         }
-        CERT_FILE = ssc.certificate();
-        KEY_FILE = ssc.privateKey();
     }
 
     protected enum RenegotiationType {
@@ -134,6 +136,7 @@ public class SocketSslEchoTest extends AbstractSocketTest {
                                             .trustManager(CERT_FILE)
                                             // As we test renegotiation we should use a protocol that support it.
                                             .protocols("TLSv1.2")
+                                            .endpointIdentificationAlgorithm(null)
                                             .build());
 
         boolean hasOpenSsl = OpenSsl.isAvailable();
@@ -148,6 +151,7 @@ public class SocketSslEchoTest extends AbstractSocketTest {
                                                 .trustManager(CERT_FILE)
                                                 // As we test renegotiation we should use a protocol that support it.
                                                 .protocols("TLSv1.2")
+                                                .endpointIdentificationAlgorithm(null)
                                                 .build());
         } else {
             logger.warn("OpenSSL is unavailable and thus will not be tested.", OpenSsl.unavailabilityCause());
@@ -175,7 +179,7 @@ public class SocketSslEchoTest extends AbstractSocketTest {
                             r = new Renegotiation(rt, cc.cipherSuites().get(cc.cipherSuites().size() - 1));
                             break;
                         default:
-                            throw new Error();
+                            throw new Error("Unexpected renegotiation type: " + rt);
                     }
 
                     for (int i = 0; i < 32; i++) {
@@ -320,7 +324,7 @@ public class SocketSslEchoTest extends AbstractSocketTest {
         clientHandshakeFuture.sync();
         clientHandshakeEventLatch.await();
 
-        clientChannel.writeAndFlush(Unpooled.wrappedBuffer(data, 0, FIRST_MESSAGE_SIZE));
+        clientChannel.writeAndFlush(randomBufferType(clientChannel.alloc(), data, 0, FIRST_MESSAGE_SIZE));
         clientSendCounter.set(FIRST_MESSAGE_SIZE);
 
         boolean needsRenegotiation = renegotiation.type == RenegotiationType.CLIENT_INITIATED;
@@ -328,7 +332,7 @@ public class SocketSslEchoTest extends AbstractSocketTest {
         while (clientSendCounter.get() < data.length) {
             int clientSendCounterVal = clientSendCounter.get();
             int length = Math.min(random.nextInt(1024 * 64), data.length - clientSendCounterVal);
-            ByteBuf buf = Unpooled.wrappedBuffer(data, clientSendCounterVal, length);
+            ByteBuf buf = randomBufferType(clientChannel.alloc(), data, clientSendCounterVal, length);
             if (useCompositeByteBuf) {
                 buf = Unpooled.compositeBuffer().addComponent(true, buf);
             }
@@ -342,7 +346,7 @@ public class SocketSslEchoTest extends AbstractSocketTest {
                 clientSslHandler.engine().setEnabledCipherSuites(new String[] { renegotiation.cipherSuite });
                 renegoFuture = clientSslHandler.renegotiate();
                 logStats("CLIENT RENEGOTIATES");
-                assertThat(renegoFuture, is(not(sameInstance(clientHandshakeFuture))));
+                assertNotSame(renegoFuture, clientHandshakeFuture);
             }
         }
 
@@ -381,6 +385,7 @@ public class SocketSslEchoTest extends AbstractSocketTest {
         clientChannel.close().awaitUninterruptibly();
         sc.close().awaitUninterruptibly();
         delegatedTaskExecutor.shutdown();
+        assertTrue(delegatedTaskExecutor.awaitTermination(5, TimeUnit.SECONDS));
 
         if (serverException.get() != null && !(serverException.get() instanceof IOException)) {
             throw serverException.get();
@@ -399,18 +404,18 @@ public class SocketSslEchoTest extends AbstractSocketTest {
         try {
             switch (renegotiation.type) {
             case SERVER_INITIATED:
-                assertThat(serverSslHandler.engine().getSession().getCipherSuite(), is(renegotiation.cipherSuite));
-                assertThat(serverNegoCounter.get(), is(2));
-                assertThat(clientNegoCounter.get(), anyOf(is(1), is(2)));
+                assertEquals(renegotiation.cipherSuite, serverSslHandler.engine().getSession().getCipherSuite());
+                assertEquals(2, serverNegoCounter.get());
+                assertThat(clientNegoCounter.get()).isIn(1, 2);
                 break;
             case CLIENT_INITIATED:
-                assertThat(serverNegoCounter.get(), anyOf(is(1), is(2)));
-                assertThat(clientSslHandler.engine().getSession().getCipherSuite(), is(renegotiation.cipherSuite));
-                assertThat(clientNegoCounter.get(), is(2));
+                assertThat(serverNegoCounter.get()).isIn(1, 2);
+                assertEquals(renegotiation.cipherSuite, clientSslHandler.engine().getSession().getCipherSuite());
+                assertEquals(2, clientNegoCounter.get());
                 break;
             case NONE:
-                assertThat(serverNegoCounter.get(), is(1));
-                assertThat(clientNegoCounter.get(), is(1));
+                assertEquals(1, serverNegoCounter.get());
+                assertEquals(1, clientNegoCounter.get());
             }
         } finally {
             logStats("STATS");
@@ -510,13 +515,7 @@ public class SocketSslEchoTest extends AbstractSocketTest {
         @Override
         public void handlerAdded(final ChannelHandlerContext ctx) {
             if (!autoRead) {
-                ctx.pipeline().get(SslHandler.class).handshakeFuture().addListener(
-                        new GenericFutureListener<Future<? super Channel>>() {
-                            @Override
-                            public void operationComplete(Future<? super Channel> future) {
-                                ctx.read();
-                            }
-                        });
+                ctx.pipeline().get(SslHandler.class).handshakeFuture().addListener(future -> ctx.read());
             }
         }
 
@@ -567,7 +566,7 @@ public class SocketSslEchoTest extends AbstractSocketTest {
                 assertEquals(data[i + lastIdx], actual[i]);
             }
 
-            ByteBuf buf = Unpooled.wrappedBuffer(actual);
+            ByteBuf buf = randomBufferType(ctx.alloc(), actual, 0, actual.length);
             if (useCompositeByteBuf) {
                 buf = Unpooled.compositeBuffer().addComponent(true, buf);
             }
@@ -582,14 +581,14 @@ public class SocketSslEchoTest extends AbstractSocketTest {
                 SslHandler sslHandler = ctx.pipeline().get(SslHandler.class);
 
                 Future<Channel> hf = sslHandler.handshakeFuture();
-                assertThat(hf.isDone(), is(true));
+                assertTrue(hf.isDone());
 
                 sslHandler.engine().setEnabledCipherSuites(new String[] { renegotiation.cipherSuite });
                 logStats("SERVER RENEGOTIATES");
                 renegoFuture = sslHandler.renegotiate();
-                assertThat(renegoFuture, is(not(sameInstance(hf))));
-                assertThat(renegoFuture, is(sameInstance(sslHandler.handshakeFuture())));
-                assertThat(renegoFuture.isDone(), is(false));
+                assertNotSame(renegoFuture, hf);
+                assertSame(renegoFuture, sslHandler.handshakeFuture());
+                assertFalse(renegoFuture.isDone());
             }
         }
     }

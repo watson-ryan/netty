@@ -16,20 +16,6 @@
 
 package io.netty.handler.ssl;
 
-import java.io.File;
-import java.net.InetSocketAddress;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.atomic.AtomicReference;
-
-import javax.net.ssl.SSLEngine;
-import javax.net.ssl.SSLException;
-
-import io.netty.util.concurrent.Future;
-
 import io.netty.bootstrap.Bootstrap;
 import io.netty.bootstrap.ServerBootstrap;
 import io.netty.buffer.ByteBuf;
@@ -41,16 +27,19 @@ import io.netty.channel.ChannelHandlerContext;
 import io.netty.channel.ChannelInboundHandlerAdapter;
 import io.netty.channel.ChannelInitializer;
 import io.netty.channel.ChannelPipeline;
-import io.netty.channel.DefaultEventLoopGroup;
 import io.netty.channel.EventLoopGroup;
+import io.netty.channel.MultiThreadIoEventLoopGroup;
 import io.netty.channel.embedded.EmbeddedChannel;
 import io.netty.channel.local.LocalAddress;
 import io.netty.channel.local.LocalChannel;
+import io.netty.channel.local.LocalIoHandler;
 import io.netty.channel.local.LocalServerChannel;
-import io.netty.channel.nio.NioEventLoopGroup;
+import io.netty.channel.nio.NioIoHandler;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import io.netty.handler.codec.DecoderException;
+import io.netty.handler.codec.TooLongFrameException;
+import io.netty.handler.ssl.util.CachedSelfSignedCertificate;
 import io.netty.handler.ssl.util.InsecureTrustManagerFactory;
 import io.netty.handler.ssl.util.SelfSignedCertificate;
 import io.netty.util.DomainNameMapping;
@@ -58,32 +47,41 @@ import io.netty.util.DomainNameMappingBuilder;
 import io.netty.util.Mapping;
 import io.netty.util.ReferenceCountUtil;
 import io.netty.util.ReferenceCounted;
+import io.netty.util.concurrent.Future;
 import io.netty.util.concurrent.Promise;
 import io.netty.util.internal.ObjectUtil;
 import io.netty.util.internal.ResourcesUtil;
 import io.netty.util.internal.StringUtil;
-import org.hamcrest.CoreMatchers;
+import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.Timeout;
 import org.junit.jupiter.api.function.Executable;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
-import static org.hamcrest.CoreMatchers.is;
-import static org.hamcrest.CoreMatchers.nullValue;
-import static org.hamcrest.MatcherAssert.assertThat;
+import java.io.File;
+import java.net.InetSocketAddress;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import javax.net.ssl.SSLEngine;
+import javax.net.ssl.SSLException;
 
-import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertInstanceOf;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assumptions.assumeTrue;
 import static org.mockito.Mockito.mock;
 
 public class SniHandlerTest {
 
-    private static ApplicationProtocolConfig newApnConfig() {
+    private static ApplicationProtocolConfig newAlpnConfig() {
         return new ApplicationProtocolConfig(
                 ApplicationProtocolConfig.Protocol.ALPN,
                 // NO_ADVERTISE is currently the only mode supported by both OpenSsl and JDK providers.
@@ -93,23 +91,22 @@ public class SniHandlerTest {
                 "myprotocol");
     }
 
-    private static void assumeApnSupported(SslProvider provider) {
+    private static void assumeAlpnSupported(SslProvider provider) {
         switch (provider) {
             case OPENSSL:
             case OPENSSL_REFCNT:
                 assumeTrue(OpenSsl.isAlpnSupported());
                 break;
             case JDK:
-                assumeTrue(JettyAlpnSslEngine.isAvailable());
                 break;
             default:
-                throw new Error();
+                throw new Error("Unexpected alpn provider: " + provider);
         }
     }
 
-    private static SslContext makeSslContext(SslProvider provider, boolean apn) throws Exception {
-        if (apn) {
-            assumeApnSupported(provider);
+    private static SslContext makeSslContext(SslProvider provider, boolean alpn) throws Exception {
+        if (alpn) {
+            assumeAlpnSupported(provider);
         }
 
         File keyFile = ResourcesUtil.getFile(SniHandlerTest.class, "test_encrypted.pem");
@@ -117,22 +114,25 @@ public class SniHandlerTest {
 
         SslContextBuilder sslCtxBuilder = SslContextBuilder.forServer(crtFile, keyFile, "12345")
                 .sslProvider(provider);
-        if (apn) {
-            sslCtxBuilder.applicationProtocolConfig(newApnConfig());
+        if (alpn) {
+            sslCtxBuilder.applicationProtocolConfig(newAlpnConfig());
         }
         return sslCtxBuilder.build();
     }
 
-    private static SslContext makeSslClientContext(SslProvider provider, boolean apn) throws Exception {
-        if (apn) {
-            assumeApnSupported(provider);
+    private static SslContext makeSslClientContext(SslProvider provider, boolean alpn) throws Exception {
+        if (alpn) {
+            assumeAlpnSupported(provider);
         }
 
         File crtFile = ResourcesUtil.getFile(SniHandlerTest.class, "test.crt");
 
-        SslContextBuilder sslCtxBuilder = SslContextBuilder.forClient().trustManager(crtFile).sslProvider(provider);
-        if (apn) {
-            sslCtxBuilder.applicationProtocolConfig(newApnConfig());
+        SslContextBuilder sslCtxBuilder = SslContextBuilder.forClient()
+                .trustManager(crtFile)
+                .endpointIdentificationAlgorithm(null)
+                .sslProvider(provider);
+        if (alpn) {
+            sslCtxBuilder.applicationProtocolConfig(newAlpnConfig());
         }
         return sslCtxBuilder.build();
     }
@@ -174,12 +174,12 @@ public class SniHandlerTest {
                         ch.writeInbound(Unpooled.wrappedBuffer(bytes));
                     }
                 });
-                assertThat(e.getCause(), CoreMatchers.instanceOf(NotSslRecordException.class));
+                assertInstanceOf(NotSslRecordException.class, e.getCause());
                 assertFalse(ch.finish());
             } finally {
                 ch.finishAndReleaseAll();
             }
-            assertThat(evtRef.get().cause(), CoreMatchers.instanceOf(NotSslRecordException.class));
+            assertInstanceOf(NotSslRecordException.class, evtRef.get().cause());
         } finally {
             releaseAll(nettyContext);
         }
@@ -233,8 +233,8 @@ public class SniHandlerTest {
                 // This should produce an alert
                 assertTrue(ch.finish());
 
-                assertThat(handler.hostname(), is("chat4.leancloud.cn"));
-                assertThat(handler.sslContext(), is(leanContext));
+                assertEquals("chat4.leancloud.cn", handler.hostname());
+                assertEquals(leanContext, handler.sslContext());
 
                 SniCompletionEvent evt = evtRef.get();
                 assertNotNull(evt);
@@ -342,9 +342,9 @@ public class SniHandlerTest {
                 buf.release();
             }
 
-            assertThat(ch.finish(), is(false));
-            assertThat(handler.hostname(), nullValue());
-            assertThat(handler.sslContext(), is(nettyContext));
+            assertFalse(ch.finish());
+            assertNull(handler.hostname());
+            assertEquals(nettyContext, handler.sslContext());
         } finally {
             releaseAll(leanContext, leanContext2, nettyContext);
         }
@@ -385,9 +385,9 @@ public class SniHandlerTest {
                 buf.release();
             }
 
-            assertThat(ch.finish(), is(false));
-            assertThat(handler.hostname(), nullValue());
-            assertThat(handler.sslContext(), is(nettyContext));
+            assertFalse(ch.finish());
+            assertNull(handler.hostname());
+            assertEquals(nettyContext, handler.sslContext());
         } finally {
             releaseAll(nettyContext);
         }
@@ -395,21 +395,30 @@ public class SniHandlerTest {
 
     @ParameterizedTest(name = "{index}: sslProvider={0}")
     @MethodSource("data")
-    public void testSniWithApnHandler(SslProvider provider) throws Exception {
-        SslContext nettyContext = makeSslContext(provider, true);
-        SslContext sniContext = makeSslContext(provider, true);
-        final SslContext clientContext = makeSslClientContext(provider, true);
+    public void testSniWithAlpnHandler(SslProvider provider) throws Exception {
+        SslContext nettyContext = null;
+        SslContext sniContext = null;
+        final SslContext clientContext;
         try {
-            final AtomicBoolean serverApnCtx = new AtomicBoolean(false);
-            final AtomicBoolean clientApnCtx = new AtomicBoolean(false);
-            final CountDownLatch serverApnDoneLatch = new CountDownLatch(1);
-            final CountDownLatch clientApnDoneLatch = new CountDownLatch(1);
+            nettyContext = makeSslContext(provider, true);
+            sniContext = makeSslContext(provider, true);
+            clientContext = makeSslClientContext(provider, true);
+        } catch (Exception e) {
+            ReferenceCountUtil.safeRelease(nettyContext);
+            ReferenceCountUtil.safeRelease(sniContext);
+            throw e;
+        }
+        try {
+            final AtomicBoolean serverAlpnCtx = new AtomicBoolean(false);
+            final AtomicBoolean clientAlpnCtx = new AtomicBoolean(false);
+            final CountDownLatch serverAlpnDoneLatch = new CountDownLatch(1);
+            final CountDownLatch clientAlpnDoneLatch = new CountDownLatch(1);
 
             final DomainNameMapping<SslContext> mapping = new DomainNameMappingBuilder<SslContext>(nettyContext)
                     .add("*.netty.io", nettyContext)
                     .add("sni.fake.site", sniContext).build();
             final SniHandler handler = new SniHandler(mapping);
-            EventLoopGroup group = new NioEventLoopGroup(2);
+            EventLoopGroup group = new MultiThreadIoEventLoopGroup(2, NioIoHandler.newFactory());
             Channel serverChannel = null;
             Channel clientChannel = null;
             try {
@@ -422,13 +431,13 @@ public class SniHandlerTest {
                         ChannelPipeline p = ch.pipeline();
                         // Server side SNI.
                         p.addLast(handler);
-                        // Catch the notification event that APN has completed successfully.
+                        // Catch the notification event that ALPN has completed successfully.
                         p.addLast(new ApplicationProtocolNegotiationHandler("foo") {
                             @Override
                             protected void configurePipeline(ChannelHandlerContext ctx, String protocol) {
                                 // addresses issue #9131
-                                serverApnCtx.set(ctx.pipeline().context(this) != null);
-                                serverApnDoneLatch.countDown();
+                                serverAlpnCtx.set(ctx.pipeline().context(this) != null);
+                                serverAlpnDoneLatch.countDown();
                             }
                         });
                     }
@@ -442,13 +451,13 @@ public class SniHandlerTest {
                     protected void initChannel(Channel ch) throws Exception {
                         ch.pipeline().addLast(new SslHandler(clientContext.newEngine(
                                 ch.alloc(), "sni.fake.site", -1)));
-                        // Catch the notification event that APN has completed successfully.
+                        // Catch the notification event that ALPN has completed successfully.
                         ch.pipeline().addLast(new ApplicationProtocolNegotiationHandler("foo") {
                             @Override
                             protected void configurePipeline(ChannelHandlerContext ctx, String protocol) {
                                 // addresses issue #9131
-                                clientApnCtx.set(ctx.pipeline().context(this) != null);
-                                clientApnDoneLatch.countDown();
+                                clientAlpnCtx.set(ctx.pipeline().context(this) != null);
+                                clientAlpnDoneLatch.countDown();
                             }
                         });
                     }
@@ -456,16 +465,15 @@ public class SniHandlerTest {
 
                 serverChannel = sb.bind(new InetSocketAddress(0)).sync().channel();
 
-                ChannelFuture ccf = cb.connect(serverChannel.localAddress());
-                assertTrue(ccf.awaitUninterruptibly().isSuccess());
+                ChannelFuture ccf = cb.connect(serverChannel.localAddress()).sync();
                 clientChannel = ccf.channel();
 
-                assertTrue(serverApnDoneLatch.await(5, TimeUnit.SECONDS));
-                assertTrue(clientApnDoneLatch.await(5, TimeUnit.SECONDS));
-                assertTrue(serverApnCtx.get());
-                assertTrue(clientApnCtx.get());
-                assertThat(handler.hostname(), is("sni.fake.site"));
-                assertThat(handler.sslContext(), is(sniContext));
+                assertTrue(serverAlpnDoneLatch.await(5, TimeUnit.SECONDS));
+                assertTrue(clientAlpnDoneLatch.await(5, TimeUnit.SECONDS));
+                assertTrue(serverAlpnCtx.get());
+                assertTrue(clientAlpnCtx.get());
+                assertEquals("sni.fake.site", handler.hostname());
+                assertEquals(sniContext, handler.sslContext());
             } finally {
                 if (serverChannel != null) {
                     serverChannel.close().sync();
@@ -473,7 +481,7 @@ public class SniHandlerTest {
                 if (clientChannel != null) {
                     clientChannel.close().sync();
                 }
-                group.shutdownGracefully(0, 0, TimeUnit.MICROSECONDS);
+                group.shutdownGracefully(100, 5000, TimeUnit.MILLISECONDS).sync();
             }
         } finally {
             releaseAll(clientContext, nettyContext, sniContext);
@@ -489,12 +497,12 @@ public class SniHandlerTest {
             case OPENSSL_REFCNT:
                 final String sniHost = "sni.netty.io";
                 LocalAddress address = new LocalAddress("testReplaceHandler-" + Math.random());
-                EventLoopGroup group = new DefaultEventLoopGroup(1);
+                EventLoopGroup group = new MultiThreadIoEventLoopGroup(1, LocalIoHandler.newFactory());
                 Channel sc = null;
                 Channel cc = null;
                 SslContext sslContext = null;
 
-                SelfSignedCertificate cert = new SelfSignedCertificate();
+                SelfSignedCertificate cert = CachedSelfSignedCertificate.getCachedCertificate();
 
                 try {
                     final SslContext sslServerContext = SslContextBuilder
@@ -597,13 +605,11 @@ public class SniHandlerTest {
                         ReferenceCountUtil.release(sslContext);
                     }
                     group.shutdownGracefully();
-
-                    cert.delete();
                 }
             case JDK:
                 return;
             default:
-                throw new Error();
+                throw new Error("Unexpected ssl provider: " + provider);
         }
     }
 
@@ -648,7 +654,7 @@ public class SniHandlerTest {
 
     private void testWithFragmentSize(SslProvider provider, final int maxFragmentSize) throws Exception {
         final String sni = "netty.io";
-        SelfSignedCertificate cert = new SelfSignedCertificate();
+        SelfSignedCertificate cert = CachedSelfSignedCertificate.getCachedCertificate();
         final SslContext context = SslContextBuilder.forServer(cert.key(), cert.cert())
                 .sslProvider(provider)
                 .build();
@@ -669,7 +675,6 @@ public class SniHandlerTest {
             assertTrue(server.finishAndReleaseAll());
         } finally {
             releaseAll(context);
-            cert.delete();
         }
     }
 
@@ -710,5 +715,147 @@ public class SniHandlerTest {
         }
         clientHello.release();
         return result;
+    }
+
+    @Test
+    public void testSniHandlerFailsOnTooBigClientHello() throws Exception {
+        SniHandler handler = new SniHandler(new Mapping<String, SslContext>() {
+            @Override
+            public SslContext map(String input) {
+                throw new UnsupportedOperationException("Should not be called");
+            }
+        }, 10, 0);
+
+        final AtomicReference<SniCompletionEvent> completionEventRef =
+                new AtomicReference<SniCompletionEvent>();
+        final EmbeddedChannel ch = new EmbeddedChannel(handler, new ChannelInboundHandlerAdapter() {
+            @Override
+            public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+                if (evt instanceof SniCompletionEvent) {
+                    completionEventRef.set((SniCompletionEvent) evt);
+                }
+            }
+        });
+        final ByteBuf buffer = ch.alloc().buffer();
+        buffer.writeByte(0x16);      // Content Type: Handshake
+        buffer.writeShort((short) 0x0303); // TLS 1.2
+        buffer.writeShort((short) 0x0006); // Packet length
+
+        // 16_777_215
+        buffer.writeByte((byte) 0x01); // Client Hello
+        buffer.writeMedium(0xFFFFFF); // Length
+        buffer.writeShort((short) 0x0303); // TLS 1.2
+
+        assertThrows(TooLongFrameException.class, new Executable() {
+            @Override
+            public void execute() throws Throwable {
+                ch.writeInbound(buffer);
+            }
+        });
+        try {
+            while (completionEventRef.get() == null) {
+                Thread.sleep(100);
+                // We need to run all pending tasks as the handshake timeout is scheduled on the EventLoop.
+                ch.runPendingTasks();
+            }
+            SniCompletionEvent completionEvent = completionEventRef.get();
+            assertNotNull(completionEvent);
+            assertNotNull(completionEvent.cause());
+            assertEquals(TooLongFrameException.class, completionEvent.cause().getClass());
+        } finally {
+            ch.finishAndReleaseAll();
+        }
+    }
+
+    @Test
+    public void testSniHandlerFiresHandshakeTimeout() throws Exception {
+        SniHandler handler = new SniHandler(new Mapping<String, SslContext>() {
+            @Override
+            public SslContext map(String input) {
+                throw new UnsupportedOperationException("Should not be called");
+            }
+        }, 0, 10);
+
+        final AtomicReference<SniCompletionEvent> completionEventRef =
+            new AtomicReference<SniCompletionEvent>();
+        EmbeddedChannel ch = new EmbeddedChannel(handler, new ChannelInboundHandlerAdapter() {
+            @Override
+            public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+                if (evt instanceof SniCompletionEvent) {
+                    completionEventRef.set((SniCompletionEvent) evt);
+                }
+            }
+        });
+        try {
+            while (completionEventRef.get() == null) {
+                Thread.sleep(100);
+                // We need to run all pending tasks as the handshake timeout is scheduled on the EventLoop.
+                ch.runPendingTasks();
+            }
+            SniCompletionEvent completionEvent = completionEventRef.get();
+            assertNotNull(completionEvent);
+            assertNotNull(completionEvent.cause());
+            assertEquals(SslHandshakeTimeoutException.class, completionEvent.cause().getClass());
+        } finally {
+            ch.finishAndReleaseAll();
+        }
+    }
+
+    @ParameterizedTest(name = "{index}: sslProvider={0}")
+    @MethodSource("data")
+    public void testSslHandlerFiresHandshakeTimeout(SslProvider provider) throws Exception {
+        final SslContext context = makeSslContext(provider, false);
+        SniHandler handler = new SniHandler(new Mapping<String, SslContext>() {
+            @Override
+            public SslContext map(String input) {
+                return context;
+            }
+        }, 0, 100);
+
+        final AtomicReference<SniCompletionEvent> sniCompletionEventRef =
+            new AtomicReference<SniCompletionEvent>();
+        final AtomicReference<SslHandshakeCompletionEvent> handshakeCompletionEventRef =
+            new AtomicReference<SslHandshakeCompletionEvent>();
+        EmbeddedChannel ch = new EmbeddedChannel(handler, new ChannelInboundHandlerAdapter() {
+            @Override
+            public void userEventTriggered(ChannelHandlerContext ctx, Object evt) {
+                if (evt instanceof SniCompletionEvent) {
+                    sniCompletionEventRef.set((SniCompletionEvent) evt);
+                } else if (evt instanceof SslHandshakeCompletionEvent) {
+                    handshakeCompletionEventRef.set((SslHandshakeCompletionEvent) evt);
+                }
+            }
+        });
+        try {
+            // Send enough data to add the SslHandler and let the handshake incomplete
+            // Client Hello with "host1" server name
+            ch.writeInbound(Unpooled.wrappedBuffer(StringUtil.decodeHexDump(
+                "16030301800100017c0303478ae7e536aa7a9debad1f873121862d2d3d3173e0ef42975c31007faeb2" +
+                "52522047f55f81fc84fe58951e2af14026147d6178498fde551fcbafc636462c016ec9005a13011302" +
+                "c02cc02bc030009dc02ec032009f00a3c02f009cc02dc031009e00a2c024c028003dc026c02a006b00" +
+                "6ac00ac0140035c005c00f00390038c023c027003cc025c02900670040c009c013002fc004c00e0033" +
+                "003200ff010000d90000000a0008000005686f737431000500050100000000000a00160014001d0017" +
+                "00180019001e01000101010201030104000b00020100000d0028002604030503060308040805080608" +
+                "09080a080b040105010601040203030301030202030201020200320028002604030503060308040805" +
+                "08060809080a080b040105010601040203030301030202030201020200110009000702000400000000" +
+                "00170000002b00050403040303002d00020101003300260024001d00200bbc37375e214c1e4e7cb90f" +
+                "869e131dc983a21f8205ba24456177f340904935")));
+
+            while (handshakeCompletionEventRef.get() == null) {
+                Thread.sleep(10);
+                // We need to run all pending tasks as the handshake timeout is scheduled on the EventLoop.
+                ch.runPendingTasks();
+            }
+            SniCompletionEvent sniCompletionEvent = sniCompletionEventRef.get();
+            assertNotNull(sniCompletionEvent);
+            assertEquals("host1", sniCompletionEvent.hostname());
+            SslCompletionEvent handshakeCompletionEvent = handshakeCompletionEventRef.get();
+            assertNotNull(handshakeCompletionEvent);
+            assertNotNull(handshakeCompletionEvent.cause());
+            assertEquals(SslHandshakeTimeoutException.class, handshakeCompletionEvent.cause().getClass());
+        } finally {
+            ch.finishAndReleaseAll();
+            releaseAll(context);
+        }
     }
 }

@@ -15,8 +15,10 @@
  */
 package io.netty.handler.ssl;
 
+import io.netty.util.internal.PlatformDependent;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Disabled;
+import org.junit.jupiter.api.condition.EnabledIf;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
 
@@ -26,6 +28,7 @@ import java.util.List;
 
 import static io.netty.handler.ssl.OpenSslTestUtils.checkShouldUseKeyManagerFactory;
 import static io.netty.internal.tcnative.SSL.SSL_CVERIFY_IGNORED;
+import static org.junit.jupiter.api.Assumptions.assumeFalse;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 public class JdkOpenSslEngineInteroptTest extends SSLEngineTest {
@@ -40,8 +43,7 @@ public class JdkOpenSslEngineInteroptTest extends SSLEngineTest {
         List<SSLEngineTestParam> params = super.newTestParams();
         List<SSLEngineTestParam> testParams = new ArrayList<SSLEngineTestParam>();
         for (SSLEngineTestParam param: params) {
-            testParams.add(new OpenSslEngineTestParam(true, param));
-            testParams.add(new OpenSslEngineTestParam(false, param));
+            OpenSslEngineTestParam.expandCombinations(param, testParams);
         }
         return testParams;
     }
@@ -233,8 +235,29 @@ public class JdkOpenSslEngineInteroptTest extends SSLEngineTest {
     @ParameterizedTest
     @Override
     public void testRSASSAPSS(SSLEngineTestParam param) throws Exception {
+        assumeFalse(PlatformDependent.javaVersion() == 26, "Fails on JDK26, possible JDK bug?");
         checkShouldUseKeyManagerFactory();
         super.testRSASSAPSS(param);
+    }
+
+    private static boolean isWrappingTrustManagerSupported() {
+        return OpenSslX509TrustManagerWrapper.isWrappingSupported();
+    }
+
+    @MethodSource("newTestParams")
+    @ParameterizedTest
+    @EnabledIf("isWrappingTrustManagerSupported")
+    @Override
+    public void testUsingX509TrustManagerVerifiesHostname(SSLEngineTestParam param) throws Exception {
+        super.testUsingX509TrustManagerVerifiesHostname(param);
+    }
+
+    @MethodSource("newTestParams")
+    @ParameterizedTest
+    @EnabledIf("isWrappingTrustManagerSupported")
+    @Override
+    public void testUsingX509TrustManagerVerifiesSNIHostname(SSLEngineTestParam param) throws Exception {
+        super.testUsingX509TrustManagerVerifiesSNIHostname(param);
     }
 
     @Override
@@ -242,14 +265,8 @@ public class JdkOpenSslEngineInteroptTest extends SSLEngineTest {
         return Java8SslTestUtils.wrapSSLEngineForTesting(engine);
     }
 
-    @SuppressWarnings("deprecation")
     @Override
     protected SslContext wrapContext(SSLEngineTestParam param, SslContext context) {
-        if (context instanceof OpenSslContext && param instanceof OpenSslEngineTestParam) {
-            ((OpenSslContext) context).setUseTasks(((OpenSslEngineTestParam) param).useTasks);
-            // Explicit enable the session cache as its disabled by default on the client side.
-            ((OpenSslContext) context).sessionContext().setSessionCacheEnabled(true);
-        }
-        return context;
+        return OpenSslEngineTestParam.wrapContext(param, context);
     }
 }

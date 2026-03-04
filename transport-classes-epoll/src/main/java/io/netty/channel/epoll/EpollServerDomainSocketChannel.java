@@ -43,6 +43,10 @@ public final class EpollServerDomainSocketChannel extends AbstractEpollServerCha
         super(fd);
     }
 
+    public EpollServerDomainSocketChannel(int fd, boolean active) {
+        super(new LinuxSocket(fd), active);
+    }
+
     EpollServerDomainSocketChannel(LinuxSocket fd) {
         super(fd);
     }
@@ -67,6 +71,8 @@ public final class EpollServerDomainSocketChannel extends AbstractEpollServerCha
         socket.listen(config.getBacklog());
         local = (DomainSocketAddress) localAddress;
         active = true;
+        // We now listen for new connections, submit the ops so we receive events.
+        submitCurrentOps();
     }
 
     @Override

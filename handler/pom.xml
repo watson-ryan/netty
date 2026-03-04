@@ -20,7 +20,7 @@
   <parent>
     <groupId>io.netty</groupId>
     <artifactId>netty-parent</artifactId>
-    <version>4.1.86.Final-SNAPSHOT</version>
+    <version>4.2.11.Final-SNAPSHOT</version>
   </parent>
 
   <artifactId>netty-handler</artifactId>
@@ -62,7 +62,7 @@
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
-      <artifactId>netty-codec</artifactId>
+      <artifactId>netty-codec-base</artifactId>
       <version>${project.version}</version>
     </dependency>
     <dependency>
@@ -77,18 +77,43 @@
       <optional>true</optional>
     </dependency>
     <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>netty-pkitesting</artifactId>
+      <version>${project.version}</version>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
       <groupId>org.bouncycastle</groupId>
-      <artifactId>bcpkix-jdk15on</artifactId>
+      <artifactId>bcpkix-jdk18on</artifactId>
       <optional>true</optional>
     </dependency>
+    <!--
+      Completely optional integration of netty-handler with Bouncy Castle.
+
+      In particular, BouncyCastleAlpnSslUtils is using
+      org.bouncycastle.jsse.{BCApplicationProtocolSelector,BCSSLEngine}
+      via reflection, loading them via Class.forName(String).
+
+      This method of use leads to zero bytecode-level traces of this
+      dependency and works for plain Java without any further reference to
+      bctls.
+
+      maven-bundle-plugin recognizes the invocation of Class.forName() parses
+      its argument to recognize the call requires the org.bouncycastle.jsse
+      to succeed. It generates an Import-Package stanza for it, resulting in
+      a bundle which does not resolve without bctls.
+
+      This declaration, along with its corresponding dependency declaration
+      in netty-handler, provides the additional information about our use.
+      Its presence allows maven-bundle-plugin to observe
+      'org.bouncycastle.jsse' to live in an optional dependency, which is
+      enough for it to also add ';resolution=optional' and thus netty-handler
+      will resolve successfully even when bctls is not present, matching our
+      intent.
+    -->
     <dependency>
-      <groupId>org.eclipse.jetty.npn</groupId>
-      <artifactId>npn-api</artifactId>
-      <optional>true</optional>
-    </dependency>
-    <dependency>
-      <groupId>org.eclipse.jetty.alpn</groupId>
-      <artifactId>alpn-api</artifactId>
+      <groupId>org.bouncycastle</groupId>
+      <artifactId>bctls-jdk18on</artifactId>
       <optional>true</optional>
     </dependency>
     <dependency>
@@ -105,8 +130,8 @@
     <dependency>
       <groupId>software.amazon.cryptools</groupId>
       <artifactId>AmazonCorrettoCryptoProvider</artifactId>
-      <version>1.1.0</version>
-      <classifier>linux-x86_64</classifier>
+      <version>${corretto.version}</version>
+      <classifier>${corretto.classifier}</classifier>
       <scope>test</scope>
     </dependency>
 
@@ -126,6 +151,52 @@
       <type>test-jar</type>
       <scope>test</scope>
     </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-api</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-engine</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter-params</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.assertj</groupId>
+      <artifactId>assertj-core</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>ch.qos.logback</groupId>
+      <artifactId>logback-classic</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>netty-testsuite-common</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
   </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>io.github.dmlloyd.module-info</groupId>
+        <artifactId>module-info</artifactId>
+        <executions>
+          <execution>
+            <id>module-info</id>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
 </project>
 

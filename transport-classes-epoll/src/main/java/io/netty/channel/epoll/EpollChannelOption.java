@@ -30,6 +30,8 @@ public final class EpollChannelOption<T> extends UnixChannelOption<T> {
     public static final ChannelOption<Integer> TCP_USER_TIMEOUT =
             valueOf(EpollChannelOption.class, "TCP_USER_TIMEOUT");
     public static final ChannelOption<Boolean> IP_FREEBIND = valueOf("IP_FREEBIND");
+    public static final ChannelOption<Boolean> IP_BIND_ADDRESS_NO_PORT = valueOf("IP_BIND_ADDRESS_NO_PORT");
+    public static final ChannelOption<Boolean> IP_MULTICAST_ALL = valueOf("IP_MULTICAST_ALL");
     public static final ChannelOption<Boolean> IP_TRANSPARENT = valueOf("IP_TRANSPARENT");
     public static final ChannelOption<Boolean> IP_RECVORIGDSTADDR = valueOf("IP_RECVORIGDSTADDR");
     /**
@@ -48,6 +50,10 @@ public final class EpollChannelOption<T> extends UnixChannelOption<T> {
     public static final ChannelOption<Boolean> TCP_QUICKACK = valueOf(EpollChannelOption.class, "TCP_QUICKACK");
     public static final ChannelOption<Integer> SO_BUSY_POLL = valueOf(EpollChannelOption.class, "SO_BUSY_POLL");
 
+    /**
+     * @deprecated Netty always uses level-triggered mode and so this method is just a no-op.
+     */
+    @Deprecated
     public static final ChannelOption<EpollMode> EPOLL_MODE =
             ChannelOption.valueOf(EpollChannelOption.class, "EPOLL_MODE");
 

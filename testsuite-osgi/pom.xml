@@ -20,7 +20,7 @@
   <parent>
     <groupId>io.netty</groupId>
     <artifactId>netty-parent</artifactId>
-    <version>4.1.86.Final-SNAPSHOT</version>
+    <version>4.2.11.Final-SNAPSHOT</version>
   </parent>
 
   <artifactId>netty-testsuite-osgi</artifactId>
@@ -31,10 +31,11 @@
   <properties>
     <exam.version>4.13.0</exam.version>
     <argLine.java9.extras>--add-opens=java.base/java.lang=ALL-UNNAMED --add-opens=java.base/jdk.internal.loader=ALL-UNNAMED --add-opens=java.base/java.net=ALL-UNNAMED --add-opens=java.base/java.security=ALL-UNNAMED</argLine.java9.extras>
-    <japicmp.skip>true</japicmp.skip>
     <!-- Do not deploy this module -->
     <skipDeploy>true</skipDeploy>
-    <javaModuleName>io.netty.testsuite_osgi</javaModuleName>
+    <maven.javadoc.skip>true</maven.javadoc.skip>
+    <!-- Skip OSGI testsuite by default -->
+    <skipOsgiTestsuite>true</skipOsgiTestsuite>
   </properties>
 
   <profiles>
@@ -149,6 +150,24 @@
     </dependency>
     <dependency>
       <groupId>${project.groupId}</groupId>
+      <artifactId>netty-codec-protobuf</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>netty-codec-marshalling</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
+      <artifactId>netty-codec-compression</artifactId>
+      <version>${project.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>${project.groupId}</groupId>
       <artifactId>netty-common</artifactId>
       <version>${project.version}</version>
       <scope>test</scope>
@@ -232,7 +251,6 @@
       <plugin>
         <groupId>com.github.veithen.alta</groupId>
         <artifactId>alta-maven-plugin</artifactId>
-        <version>0.6.2</version>
         <executions>
           <execution>
             <goals>
@@ -241,6 +259,7 @@
             <configuration>
               <name>%bundle.symbolicName%.link</name>
               <value>%url%</value>
+              <separator>${line.separator}</separator>
               <dependencySet>
                 <scope>test</scope>
               </dependencySet>
